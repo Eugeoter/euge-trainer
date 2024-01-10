@@ -259,6 +259,12 @@ class Dataset(torch.utils.data.Dataset):
 
             caption = img_md.get('tags', None) or img_md.get('caption', None)
 
+            num_repeats = img_md.get('num_repeats', None) or num_repeats_record.get(img_key, None)
+            if num_repeats is None:
+                num_repeats = custom_train_utils.get_num_repeats(img_key, img_md, counter, artist_benchmark)
+            if num_repeats == 0:  # drop
+                return
+
             # image_size = img_md.get("image_size", None)
             image_size = None
             latents_size = None
@@ -277,10 +283,6 @@ class Dataset(torch.utils.data.Dataset):
                 bucket_reso = image_size  # ! directly use latents_size as bucket_reso
 
             original_size = img_md.get('original_size', None)
-
-            num_repeats = img_md.get('num_repeats', None) or num_repeats_record.get(img_key, None)
-            if num_repeats is None:
-                num_repeats = custom_train_utils.get_num_repeats(img_key, img_md, counter, artist_benchmark)
 
             if self.recording_dir:
                 num_repeats_record[img_key] = num_repeats
@@ -484,7 +486,7 @@ class Dataset(torch.utils.data.Dataset):
             batches.append(batch)
 
         if self.num_processes > 1:
-            batches = batches[::self.process_idx]  # split batches into processes
+            batches = batches[self.process_idx::self.num_processes]  # split batches into processes
 
         pbar = tqdm(total=len(batches), desc='caching latents', disable=not self.is_main_process)
         for batch in batches:

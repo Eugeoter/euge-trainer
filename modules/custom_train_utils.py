@@ -33,11 +33,18 @@ def count_metadata(metadata):
 
 
 def get_num_repeats(img_key, img_md, counter, benchmark):
-    least_num_repeats = 1
+    if img_key.startswith('celluloid_animation_screenshot'):
+        return 0
+    least_num_repeats = 2
     num_repeats = least_num_repeats
     artist = img_md.get('artist')
     if artist:
         num_repeats *= min(benchmark / counter["artist"][artist], 5)
+    quality = img_md.get('quality', 'normal')
+    if quality in ('low', 'worst'):
+        return 0  # no training
+    elif quality == 'amazing':
+        num_repeats *= 10
     num_repeats = int(num_repeats)
     num_repeats = max(least_num_repeats, num_repeats)
     return num_repeats
