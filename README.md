@@ -32,15 +32,19 @@
 
 ### 1. 安装
 
-`git clone https://github.com/Eugeoter/sdxl-trainer`
-`cd sdxl-trainer`
-`pip install -r requirements.txt`
+1. `git clone https://github.com/Eugeoter/sdxl-trainer`
+
+2. `cd sdxl-trainer`
+
+3. `pip install -r requirements.txt`
 
 ### 2. 训练
 
 #### 2.1. 数据
 
 准备好图像（或潜变量缓存）文件和元数据 json 文件，将图像（或潜变量缓存）文件放置在同一文件夹 image_dir 内。
+
+生成元数据文件可使用 kohya-ss 项目或 `https://github.com/Eugeoter?tab=repositories` 项目。是时候摆脱 txt 标注文件了。
 
 #### 2.2. 参数
 
