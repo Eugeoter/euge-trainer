@@ -417,6 +417,7 @@ class Dataset(torch.utils.data.Dataset):
             else:  # make from image file
                 bucket_reso = get_bucket_reso(img_info.image_size, buckets=self.predefined_bucket_resos,
                                               max_resolution=self.resolution, divisible=self.bucket_reso_step)
+                img_info.bucket_reso = bucket_reso
 
             assert img_info.bucket_reso[0] % self.bucket_reso_step == 0 and img_info.bucket_reso[1] % self.bucket_reso_step == 0, \
                 f"bucket reso must be divisible by {self.bucket_reso_step}: {img_info.bucket_reso}"

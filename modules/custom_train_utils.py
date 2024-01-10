@@ -33,7 +33,7 @@ def count_metadata(metadata):
 
 
 def get_num_repeats(img_key, img_md, counter, benchmark):
-    least_num_repeats = 2
+    least_num_repeats = 1
     num_repeats = least_num_repeats
     artist = img_md.get('artist')
     if artist:

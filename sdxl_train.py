@@ -305,6 +305,18 @@ def train(args):
                     progress_bar.update(1)
                     global_step += 1
 
+                    sdxl_train_utils.sample_images(
+                        accelerator,
+                        args,
+                        None,
+                        global_step,
+                        accelerator.device,
+                        vae,
+                        [tokenizer1, tokenizer2],
+                        [text_encoder1, text_encoder2],
+                        unet,
+                    )
+
                 # loggings
                 current_loss = loss.detach().item()
                 if args.logging_dir is not None:
@@ -373,6 +385,18 @@ def train(args):
                         torch.cuda.empty_cache()
                         gc.collect()
                     progress_bar.write(f"model saved at `{p}`")
+
+            sdxl_train_utils.sample_images(
+                accelerator,
+                args,
+                epoch + 1,
+                global_step,
+                accelerator.device,
+                vae,
+                [tokenizer1, tokenizer2],
+                [text_encoder1, text_encoder2],
+                unet,
+            )
 
     except KeyboardInterrupt:
         do_save = is_main_process and args.save_on_keyboard_interrupt

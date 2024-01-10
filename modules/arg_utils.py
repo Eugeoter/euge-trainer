@@ -77,6 +77,13 @@ def parse_arguments():
     parser.add_argument("--save_on_train_end", action='store_true', help="Save on training end / 训练结束时保存")
     parser.add_argument("--save_on_keyboard_interrupt", action='store_true', help="Save on keyboard interrupt / 键盘中断时保存")
     parser.add_argument("--save_on_exception", action='store_true', help="Save on exception / 异常时保存")
+    parser.add_argument("--sample_every_n_epochs", type=int, default=None, help="Sample every N epochs / 每 N 个周期采样一次")
+    parser.add_argument("--sample_every_n_steps", type=int, default=None, help="Sample every N steps / 每 N 个步骤采样一次")
+    parser.add_argument("--sample_prompts", type=str, default=None, help="file for prompts to generate sample images / 用于生成样本图像的提示文件")
+    parser.add_argument("--sample_sampler", type=str, default="ddim",
+                        choices=["ddim", "pndm", "lms", "euler", "euler_a", "heun", "dpm_2", "dpm_2_a", "dpmsolver",
+                                 "dpmsolver++", "dpmsingle", "k_lms", "k_euler", "k_euler_a", "k_dpm_2", "k_dpm_2_a"],
+                        help=f"sampler (scheduler) type for sample images / 用于生成样本图像的采样器（调度器）类型")
 
     # Cache Parameters
     parser.add_argument("--cache_latents", action='store_true', help="Cache latents / 缓存潜变量")
