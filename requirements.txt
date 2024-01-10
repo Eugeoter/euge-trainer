@@ -1,0 +1,14 @@
+opencv-python
+pillow
+scipy
+aiofiles
+torch==2.0.1
+torchvision==0.15.2
+transformers==4.30.2
+diffusers
+xformers==0.0.20
+safetensors
+accelerate
+einops
+bitsandbytes==0.39.1
+# lion_pytorch
