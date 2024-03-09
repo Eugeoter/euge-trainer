@@ -1,7 +1,7 @@
 import torch
 import gc
-from modules.dataset import Dataset
-from modules import model_utils, sdxl_train_utils, arg_utils, log_utils as logu
+from modules.sdxl_dataset_utils import Dataset
+from modules import model_utils, sdxl_train_utils, sdxl_dataset_utils, arg_utils, log_utils as logu
 
 
 def cache_latents(
@@ -20,10 +20,12 @@ def cache_latents(
     vae.eval()
 
     tokenizer1, tokenizer2 = sdxl_train_utils.load_tokenizers(args.tokenizer_cache_dir, args.max_token_length)
-    dataset = sdxl_train_utils.load_dataset(
-        args,
-        tokenizer1,
-        tokenizer2,
+
+    print(f"prepare dataset...")
+    dataset = sdxl_dataset_utils.Dataset(
+        args=args,
+        tokenizer1=tokenizer1,
+        tokenizer2=tokenizer2,
         latents_dtype=latents_dtype,
         is_main_process=accelerator.is_main_process,
         num_processes=accelerator.num_processes,
@@ -49,5 +51,5 @@ def cache_latents(
 
 
 if __name__ == "__main__":
-    args = arg_utils.parse_arguments()
+    args = arg_utils.add_train_arguments()
     cache_latents(args)

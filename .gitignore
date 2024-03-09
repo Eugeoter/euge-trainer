@@ -167,3 +167,4 @@ output/
 tokenizers/
 *_test.py
 draft*.py
+wandb/

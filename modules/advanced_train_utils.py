@@ -68,6 +68,7 @@ def apply_snr_weight(loss, timesteps, noise_scheduler, gamma, v_prediction=False
 
 
 def scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler):
+    # ? scale v-pred loss back to noise-pred loss
     scale = get_snr_scale(timesteps, noise_scheduler)
     loss = loss * scale
     return loss

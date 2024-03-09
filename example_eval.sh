@@ -1,0 +1,12 @@
+accelerate launch sdxl_eval.py \
+    --benchmark_file './benchmarks/example_benchmark.json' \
+    --output_dir './outputs/eval' \
+    --pretrained_model_name_or_path './models/sdxl.safetensors' \
+    --vae './models/sdxl_vae.safetensors' \
+    --tokenizer_cache_dir './tokenizers' \
+    --sample_sampler 'euler_a' \
+    --no_half_vae \
+    --mixed_precision 'fp16' \
+    --xformers \
+    --max_token_length 225 \
+    --batch_size 4

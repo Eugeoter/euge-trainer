@@ -788,6 +788,7 @@ class Upsample2D(nn.Module):
 
         return hidden_states
 
+
 class SdxlUNet2DConditionModel(nn.Module):
     _supports_gradient_checkpointing = True
 
@@ -1074,7 +1075,10 @@ class SdxlUNet2DConditionModel(nn.Module):
             h = call_module(module, h, emb, context)
             hs.append(h)
 
-        h = call_module(self.middle_block, h, emb, context)
+        down_block_res_sample = h
+
+        h = call_module(self.middle_block, h, emb, context)  # middle block resnet sample
+        mid_block_res_sample = h
 
         for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
@@ -1083,4 +1087,4 @@ class SdxlUNet2DConditionModel(nn.Module):
         h = h.type(x.dtype)
         h = call_module(self.out, h, emb, context)
 
-        return h
+        return h, down_block_res_sample, mid_block_res_sample

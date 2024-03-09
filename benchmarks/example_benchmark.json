@@ -1,0 +1,23 @@
+[
+    {
+        "prompt": "clean color, asuna, amazing quality",
+        "negative_prompt": "(worst quality:1.3), low quality, lowres, bad, deformed hands, fused fingers, extra digits, disfigured, distorted",
+        "sample_steps": 28,
+        "width": 832,
+        "height": 1216
+    },
+    {
+        "prompt": "A girl surrounded by black roses, full body, scared, black long hair with blunt bangs, in black dress with frills and lace, smile with face blush, aesthetic, beautiful color, (amazing quality:1.5), by modare, by ask, by ikky, depth of field, chromatic aberration, black theme, perspective, amazing lighting and shadow",
+        "negative_prompt": "(worst quality:1.3), low quality, lowres, bad, deformed hands, fused fingers, extra digits, disfigured, distorted",
+        "sample_steps": 28,
+        "width": 1344,
+        "height": 704
+    },
+    {
+        "prompt": "1girl, solo, in transparent PVC jacket, amazing quality, detailed, beautiful color, detailed, by hachihito, by iamuu, by magotsuki, by aamond777",
+        "negative_prompt": "(worst quality:1.3), low quality, lowres, bad, deformed hands, fused fingers, extra digits, disfigured, distorted",
+        "sample_steps": 28,
+        "width": 832,
+        "height": 1216
+    }
+]

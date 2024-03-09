@@ -1,42 +1,39 @@
 accelerate launch sdxl_train.py \
     --image_dir './datasets/dataset' \
     --metadata_file './datasets/metadata.json' \
-    --recording_dir './datasets/records' \
+    --pretrained_model_name_or_path './models/sdxl.safetensors' \
+    --vae './models/sdxl_vae.safetensors' \
     --logging_dir './logs' \
-    --pretrained_model_name_or_path './models/model.safetensors' \
-    --vae './models/vae.safetensors' \
+    --recording_dir './datasets/records' \
+    --tokenizer_cache_dir './tokenizers' \
     --mixed_precision 'bf16' \
     --save_precision 'bf16' \
     --full_bf16 \
-    --optimizer_type 'AdamW8bit' \
+    --optimizer_type 'AdaFactor' \
+    --gradient_checkpointing \
+    --gradient_accumulation_steps 48 \
     --num_train_epochs 100 \
     --batch_size 1 \
-    --learning_rate 7.5e-7 \
+    --learning_rate 7.5e-6 \
     --train_text_encoder \
-    --learning_rate_te1 7.5e-7 \
-    --learning_rate_te2 1e-7 \
-    --lr_scheduler cosine_with_restarts \
-    --lr_scheduler_num_cycles 10 \
+    --learning_rate_te1 3.75e-6 \
+    --learning_rate_te2 3.75e-6 \
+    --lr_scheduler constant_with_warmup \
     --lr_warmup_steps 500 \
     --save_every_n_epochs 1 \
-    --save_every_n_steps 7200 \
+    --save_every_n_steps 500 \
     --save_on_train_end \
     --save_on_keyboard_interrupt \
     --sample_every_n_epochs 1 \
-    --sample_every_n_steps 7200 \
-    --sample_prompts './sample_prompts.txt' \
+    --sample_every_n_steps 500 \
+    --sample_prompts './benchmarks/example_benchmark.json' \
     --sample_sampler 'euler_a' \
     --xformers \
     --vae_batch_size 4 \
-    --fixed_tag_dropout_rate 0.25 \
-    --flex_tag_dropout_rate 0.35 \
     --flip_aug \
-    --shuffle_caption \
-    --min_snr_gamma 5 \
     --cache_latents \
     --cache_latents_to_disk \
     --keep_cached_latents_in_memory \
-    --tokenizer_cache_dir './tokenizers' \
     --max_token_length 225 \
     --max_dataset_n_workers 40
     

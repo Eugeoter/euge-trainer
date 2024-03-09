@@ -1,17 +1,27 @@
 import torch
+import torch.distributed
 import os
 import math
+import json
 import gc
-import time
 import traceback
+import cv2
+import numpy as np
+from argparse import ArgumentParser
 from torch.utils.data import DataLoader
 from diffusers import DDPMScheduler
 from tqdm import tqdm
-from modules import advanced_train_utils, sdxl_train_utils, arg_utils, log_utils as logu
+from modules import advanced_train_utils, sdxl_train_utils, sdxl_eval_utils, sdxl_dataset_utils, arg_utils, log_utils as logu
+from modules.sdxl_lpw_stable_diffusion import SdxlStableDiffusionLongPromptWeightingPipeline
+# from modules.dataset import make_canny
 
 
 def train(args):
+    args.optimizer_args = json.loads(args.optimizer_args) if args.optimizer_args != '*' else []
+
+    # torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=5400))
     accelerator = sdxl_train_utils.prepare_accelerator(args)
+
     is_main_process = accelerator.is_main_process
     local_process_index = accelerator.state.local_process_index
     num_processes = accelerator.state.num_processes
@@ -30,20 +40,24 @@ def train(args):
         ckpt_info,
     ) = sdxl_train_utils.load_target_model(args, accelerator, "sdxl", weight_dtype)
 
+    if is_main_process:
+        print("prepare tokenizers")
     tokenizer1, tokenizer2 = sdxl_train_utils.load_tokenizers(args.tokenizer_cache_dir, args.max_token_length)
 
     vae.to(accelerator.device, dtype=vae_dtype)
     vae.requires_grad_(False)
     vae.eval()
 
-    dataset = sdxl_train_utils.load_dataset(
-        args,
-        tokenizer1,
-        tokenizer2,
+    if is_main_process:
+        print(f"prepare dataset...")
+    dataset = sdxl_dataset_utils.Dataset(
+        args=args,
+        tokenizer1=tokenizer1,
+        tokenizer2=tokenizer2,
         latents_dtype=weight_dtype,
         is_main_process=is_main_process,
         num_processes=num_processes,
-        process_idx=local_process_index
+        process_idx=local_process_index,
     )
 
     if args.cache_latents:
@@ -57,7 +71,7 @@ def train(args):
     dataloader_n_workers = min(args.max_dataloader_n_workers, os.cpu_count() - 1)
     train_dataloader = DataLoader(
         dataset,
-        batch_size=1,
+        batch_size=1,  # fix to 1 because collate_fn returns a dict
         num_workers=dataloader_n_workers,
         shuffle=True,
         collate_fn=sdxl_train_utils.collate_fn,
@@ -110,10 +124,12 @@ def train(args):
         train_text_encoder2 = lr_te2 > 0
         if not train_text_encoder1:
             text_encoder1.to(weight_dtype)
+        else:
             training_models.append(text_encoder1)
             params_to_optimize.append({"params": list(text_encoder1.parameters()), "lr": lr_te1})
         if not train_text_encoder2:
             text_encoder2.to(weight_dtype)
+        else:
             training_models.append(text_encoder2)
             params_to_optimize.append({"params": list(text_encoder2.parameters()), "lr": lr_te2})
         text_encoder1.requires_grad_(train_text_encoder1)
@@ -130,6 +146,7 @@ def train(args):
         text_encoder1.eval()
         text_encoder2.eval()
 
+    total_batch_size = args.batch_size * args.gradient_accumulation_steps * num_processes
     num_train_epochs = args.num_train_epochs
     num_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps / num_processes)
     num_train_steps = num_train_epochs * num_steps_per_epoch
@@ -164,6 +181,12 @@ def train(args):
         (text_encoder2,) = sdxl_train_utils.transform_models_if_DDP([text_encoder2])
         text_encoder2.to(accelerator.device)
 
+    # calculate number of trainable parameters
+    n_params = 0
+    for params in params_to_optimize:
+        for p in params["params"]:
+            n_params += p.numel()
+
     if args.full_fp16:
         sdxl_train_utils.patch_accelerator_for_fp16_training(accelerator)
 
@@ -185,19 +208,39 @@ def train(args):
     if is_main_process and args.logging_dir is not None:
         accelerator.init_trackers("finetuning", init_kwargs={})
 
-    progress_bar = tqdm(total=num_train_steps, smoothing=0, desc='steps', disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(total=num_train_steps, desc='steps', disable=not accelerator.is_local_main_process)
     global_step = 0
-    loss_recorder = sdxl_train_utils.LossRecorder(length=args.loss_record_stride)
+    nan_cnt = 0
+    loss_recorder = sdxl_train_utils.LossRecorder(gamma=args.loss_recorder_gamma)
 
     accelerator.print(f"starting learning")
     accelerator.print(f"  device: {accelerator.device}")
     accelerator.print(f"  learning rate: {args.learning_rate} | te1: {args.learning_rate_te1 if train_text_encoder1 else 0} | te2: {args.learning_rate_te2 if train_text_encoder2 else 0}")
-    accelerator.print(f"  batch size: {args.batch_size} | optimizer: {args.optimizer_type.lower()}")
+    accelerator.print(f"  batch size: {args.batch_size} | gradient accumulation steps: {args.gradient_accumulation_steps} | num_processes: {num_processes} | total_batch_size: {total_batch_size}")
     accelerator.print(f"  mixed precision: {args.mixed_precision} | weight-dtype: {weight_dtype} | save-dtype: {save_dtype}")
     accelerator.print(f"  gradient accumulation steps: {args.gradient_accumulation_steps}")
     accelerator.print(f"  num train steps: {num_train_steps}")
     accelerator.print(f"  num train epochs: {num_train_epochs}")
     accelerator.print(f"  num steps per epoch: {num_steps_per_epoch}")
+    accelerator.print(f"  train unet: {train_unet} | train text encoder 1: {train_text_encoder1} | train text encoder 2: {train_text_encoder2}")
+    accelerator.print(f"  number of trainable parameters: {n_params}")
+
+    if args.control:
+        from diffusers import ControlNetModel
+        from diffusers.image_processor import VaeImageProcessor
+        control_image_processor = VaeImageProcessor(
+            vae_scale_factor=sdxl_train_utils.VAE_SCALE_FACTOR, do_convert_rgb=True, do_normalize=False
+        )
+        controlnet = ControlNetModel.from_pretrained(
+            "diffusers/controlnet-canny-sdxl-1.0",
+            torch_dtype=weight_dtype,
+        ).to(accelerator.device)
+        global_pool_conditions = (
+            controlnet.config.global_pool_conditions
+            if isinstance(controlnet, ControlNetModel)
+            else controlnet.nets[0].config.global_pool_conditions
+        )
+        guess_mode = global_pool_conditions
 
     try:
         for epoch in range(num_train_epochs):
@@ -209,8 +252,8 @@ def train(args):
                 with accelerator.accumulate(*training_models):
                     if batch.get("latents") is not None:
                         latents = batch["latents"].to(accelerator.device)
-                        if latents.dtype != weight_dtype:
-                            latents = latents.to(weight_dtype)
+                        # if latents.dtype != weight_dtype:
+                        #     latents = latents.to(weight_dtype)
                     else:
                         # print(f"missing latents in batch {batch['image_keys']}")
                         with torch.no_grad():
@@ -254,12 +297,47 @@ def train(args):
                     noisy_latents = noisy_latents.to(weight_dtype)
 
                     with accelerator.autocast():
-                        noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
+                        noise_pred, unet_down_block_resnet_samples, unet_middle_block_resnet_sample = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
 
-                    # Deprecated
-                    # if args.weighted_noise_type == 'canny':
-                    #     canny = batch["canny"].to(accelerator.device).to(dtype=weight_dtype)
-                    #     noise = sdxl_train_utils.apply_weighted_noise(noise, canny, weight=args.weighted_noise_weight)
+                    if args.control:
+                        images = batch["images"]
+                        for i in range(len(images)):
+                            image = cv2.Canny(images[i], 100, 200)
+                            image = image[:, :, None]
+                            image = np.concatenate([image, image, image], axis=2)
+                            images[i] = image
+                        tar_sz = target_size[0]
+                        height = int(tar_sz[0].item())
+                        width = int(tar_sz[1].item())
+                        with torch.no_grad():
+                            print(f"height: {height} | width: {width}")
+                            images = control_image_processor.preprocess([img for img in images], height=int(height), width=int(width)).to(dtype=torch.float32)
+                        images = images.to(accelerator.device)
+                        print(f"images.shape: {images.shape}")
+                        added_cond_kwargs = {"text_embeds": pool2, "time_ids": embs}
+
+                        with torch.no_grad():
+                            print(f"shape: noise_pred: {noise_pred.shape} | time: {timesteps.shape} | text_embedding: {text_embedding.shape} | images: {images.shape} | noisy_latents: {noisy_latents.shape}")
+                            controlnet_down_block_res_samples, controlnet_mid_block_res_sample = controlnet(
+                                noisy_latents,
+                                timesteps,
+                                encoder_hidden_states=text_embedding,
+                                controlnet_cond=images,
+                                conditioning_scale=1,
+                                guess_mode=guess_mode,
+                                return_dict=False,
+                                added_cond_kwargs=added_cond_kwargs,
+                            )
+
+                        down_loss = torch.nn.functional.mse_loss(unet_down_block_resnet_samples.float(), controlnet_down_block_res_samples.float(), reduction="mean")
+                        mid_loss = torch.nn.functional.mse_loss(unet_middle_block_resnet_sample.float(), controlnet_mid_block_res_sample.float(), reduction="mean")
+
+                        # if guess_mode and do_classifier_free_guidance:
+                        #     # Infered ControlNet only for the conditional batch.
+                        #     # To apply the output of ControlNet to both the unconditional and conditional batches,
+                        #     # add 0 to the unconditional batch to keep it unchanged.
+                        #     down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+                        #     mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
 
                     target = noise
 
@@ -286,8 +364,13 @@ def train(args):
                     else:
                         loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="mean")
 
+                    if args.control:
+                        progress_bar.write(f"down_loss: {down_loss} | mid_loss: {mid_loss}")
+                        loss = (loss + down_loss + mid_loss) / 3.
+
                     if torch.isnan(loss):
-                        progress_bar.write("NaN found in loss, replacing with zeros")
+                        # progress_bar.write("NaN found in loss, replacing with zeros")
+                        nan_cnt += 1
                         loss = torch.where(torch.isnan(loss), torch.zeros_like(loss), loss)
 
                     accelerator.backward(loss)
@@ -305,68 +388,80 @@ def train(args):
                     progress_bar.update(1)
                     global_step += 1
 
-                    sdxl_train_utils.sample_images(
-                        accelerator,
-                        args,
-                        None,
-                        global_step,
-                        accelerator.device,
-                        vae,
-                        [tokenizer1, tokenizer2],
-                        [text_encoder1, text_encoder2],
-                        unet,
+                    sdxl_eval_utils.sample_during_train(
+                        pipe_class=SdxlStableDiffusionLongPromptWeightingPipeline,
+                        accelerator=accelerator,
+                        args=args,
+                        epoch=None,
+                        steps=global_step,
+                        unet=unet,
+                        text_encoder=[text_encoder1, text_encoder2],
+                        vae=vae,
+                        tokenizer=[tokenizer1, tokenizer2],
+                        device=accelerator.device,
                     )
 
+                    if args.save_every_n_steps is not None and (global_step + 1) % args.save_every_n_steps == 0:
+                        accelerator.wait_for_everyone()
+                        if is_main_process:
+                            progress_bar.write(f"saving model at step {global_step + 1}")
+                            p = sdxl_train_utils.save_sd_model(
+                                args,
+                                save_dtype,
+                                epoch + 1,
+                                global_step + 1,
+                                accelerator.unwrap_model(text_encoder1),
+                                accelerator.unwrap_model(text_encoder2),
+                                accelerator.unwrap_model(unet),
+                                vae,
+                                logit_scale,
+                                ckpt_info
+                            )
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                                gc.collect()
+                            progress_bar.write(f"model saved at `{p}`")
+                        accelerator.wait_for_everyone()
+
                 # loggings
-                current_loss = loss.detach().item()
+                step_loss: float = loss.detach().item()
+                avr_loss: float = loss_recorder.moving_average(window=args.loss_recorder_stride)
+                ema_loss: float = loss_recorder.ema
                 if args.logging_dir is not None:
-                    logs = {"loss": current_loss}
+                    logs = {"loss/step": step_loss, 'loss_avr/step': avr_loss, 'loss_ema/step': ema_loss}
                     if block_lrs is None:
                         sdxl_train_utils.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_unet)
                     else:
                         sdxl_train_utils.append_block_lr_to_logs(block_lrs, logs, lr_scheduler, args.optimizer_type)  # U-Net is included in block_lrs
                     accelerator.log(logs, step=global_step)
-                loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
-                avr_loss: float = loss_recorder.moving_average
+
+                loss_recorder.add(loss=step_loss)
                 pbar_logs = {
                     'lr': lr_scheduler.get_last_lr()[0],
                     'epoch': epoch + 1,
-                    'next': num_steps_per_epoch - step - 1,
+                    'global_step': global_step + 1,
+                    'next': len(train_dataloader) - step - 1,
+                    'step_loss': step_loss,
                     'avr_loss': avr_loss,
-                    'cur_loss': current_loss,
+                    'ema_loss': ema_loss,
+                    'nan': nan_cnt,
                     # 'batch': batch['image_keys'][0],
                 }
                 progress_bar.set_postfix(pbar_logs)
 
                 # del batch, latents, orig_size, target_size, crop_size, input_ids1, input_ids2, encoder_hidden_states1, encoder_hidden_states2, pool2, embs, vector_embedding, text_embedding, noise, noisy_latents, timesteps, noise_pred, target, loss
 
-                if is_main_process and args.save_every_n_steps and (global_step + 1) % args.save_every_n_steps == 0:
-                    progress_bar.write(f"saving model at step {global_step + 1}")
-                    p = sdxl_train_utils.save_sd_model(
-                        args,
-                        save_dtype,
-                        epoch + 1,
-                        global_step + 1,
-                        accelerator.unwrap_model(text_encoder1),
-                        accelerator.unwrap_model(text_encoder2),
-                        accelerator.unwrap_model(unet),
-                        vae,
-                        logit_scale,
-                        ckpt_info
-                    )
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                    progress_bar.write(f"model saved at `{p}`")
-
             # end of epoch
 
             if args.logging_dir is not None:
-                logs = {"loss/epoch": loss_recorder.moving_average}
+                logs = {
+                    "loss/epoch": loss_recorder.moving_average(window=num_steps_per_epoch)
+                }
                 accelerator.log(logs, step=epoch + 1)
 
             accelerator.wait_for_everyone()
-            if args.save_every_n_epochs and is_main_process and (epoch + 1) % args.save_every_n_epochs == 0:
+
+            if args.save_every_n_epochs and (epoch + 1) % args.save_every_n_epochs == 0:
                 if is_main_process:
                     progress_bar.write(f"saving model at epoch {epoch + 1}")
                     p = sdxl_train_utils.save_sd_model(
@@ -385,6 +480,7 @@ def train(args):
                         torch.cuda.empty_cache()
                         gc.collect()
                     progress_bar.write(f"model saved at `{p}`")
+                # accelerator.wait_for_everyone()
 
             sdxl_train_utils.sample_images(
                 accelerator,
@@ -441,5 +537,9 @@ def train(args):
 
 
 if __name__ == "__main__":
-    args = arg_utils.parse_arguments()
+    parser = ArgumentParser()
+    arg_utils.add_model_arguments(parser)
+    arg_utils.add_train_arguments(parser)
+
+    args = parser.parse_args()
     train(args)
