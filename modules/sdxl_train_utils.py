@@ -179,7 +179,7 @@ def load_target_model(config, accelerator, model_version: str, weight_dtype):
     model_dtype = match_mixed_precision(config, weight_dtype)  # prepare fp16/bf16
     for pi in range(accelerator.state.num_processes):
         if pi == accelerator.state.local_process_index:
-            logger.print(f"loading model for process {accelerator.state.local_process_index}/{accelerator.state.num_processes}")
+            logger.print(f"loading model for process {accelerator.state.local_process_index}/{accelerator.state.num_processes}", disable=False)
 
             (
                 load_stable_diffusion_format,

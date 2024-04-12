@@ -2,108 +2,6 @@ import random
 from ml_collections import ConfigDict
 
 
-def fmt2danbooru(tag):
-    if isinstance(tag, str):  # 单个标签
-        return tag.replace(' ', '_').replace('\(', '(').replace('\)', ')')
-    elif isinstance(tag, list):  # 标签列表
-        return [fmt2danbooru(t) for t in tag]
-    else:  # None
-        return tag
-
-
-QUALITY2NRP = {
-    'amazing': 5,
-    'best': 2.5,
-    'high': 1.5,
-    'normal': 1,
-}
-
-
-def get_num_repeats(img_key, img_md, **kwargs):
-    r"""
-    提高弱势类别数据的训练权重，以及图片高质量图像的权重。
-    """
-    artist_benchmark = 100
-    character_benchmark = 1000
-    min_num_repeats = 1
-    max_num_repeats = 10
-
-    counter = kwargs.get('counter')  # 获取计数器
-
-    num_repeats = 1
-
-    artist = fmt2danbooru(img_md['artist'])
-    if artist is not None:
-        cnt = counter['artist'][artist]
-        if cnt >= 25:
-            num_repeats *= max(1, artist_benchmark / cnt)
-
-    characters = fmt2danbooru(img_md['characters'])
-    if characters is not None:
-        for character in characters:
-            cnt = counter['character'][character]
-            if cnt >= 50:
-                num_repeats *= max(1, character_benchmark / cnt)
-
-    quality = img_md.get('quality')
-    if quality in ('horrible', 'worst', 'low'):
-        return 0  # 不训练
-    elif quality in QUALITY2NRP:
-        num_repeats *= QUALITY2NRP[quality]
-
-    num_repeats = int(num_repeats)
-    num_repeats = min(max_num_repeats, num_repeats)
-    num_repeats = max(min_num_repeats, num_repeats)
-    return num_repeats
-
-
-SAFE2TAG = {
-    'g': 'rating: general, safe',
-    's': 'rating: sensitive',
-    'q': 'rating: questionable',
-    'e': 'rating: explicit, nsfw',
-}
-
-
-def process_caption(img_info, **kwargs):
-    r"""
-    按以下方式处理标签：
-    - 如果图像水平翻转，将标签中的“左”和“右”互换
-    - 按照图像的原图尺寸，添加缩略图和低分辨率标签
-    - 按照图像的安全评级，添加安全评级标签
-    - 如果艺术家标签出现频率过高，则以一定概率移除之
-    - 解析并还原艺术家、角色和风格标签
-    """
-    artist_benchmark = 100
-    character_benchmark = 1000
-    caption = img_info.caption
-    tags = caption.split(', ')
-
-    if (flip_aug := kwargs.get('flip_aug', False)):
-        tags = [tag.replace('left', 'right').replace('right', 'left') for tag in tags]
-
-    if (original_size := img_info.original_size):
-        original_area = original_size[0] * original_size[1]
-        if original_area <= 256*256:
-            tags.append('thumbnail')
-        elif original_area <= 640*640:
-            tags.append('lowres')
-
-    if (safe_level := img_info.safe_level) and safe_level in SAFE2TAG:
-        tags.extend(SAFE2TAG[safe_level].split(', '))
-
-    counter = kwargs['counter']
-    if (artist := img_info.metadata.get('artist')) and (cnt := counter[fmt2danbooru(artist)]) > artist_benchmark:
-        artist_tag = f'artist: {artist}'
-        if artist_tag in tags and random.random() > artist_benchmark / cnt:
-            tags.remove(artist_tag)
-
-    tags = [tag.split(':')[1].strip() for tag in tags if tag.startswith(('character:', 'style:'))]
-    tags = ['by ' + tag.split(':')[1].strip() for tag in tags if tag.startswith('artist:')]
-
-    return ', '.join(tags)
-
-
 def cfg(**kwargs):
     return ConfigDict(initial_dictionary=kwargs)
 
@@ -122,6 +20,7 @@ def get_config():
 
     config.no_half_vae = False
     config.tokenizer_cache_dir = 'tokenizers'
+    config.records_cache_dir = 'records'
 
     # Dataset Parameters
     config.flip_aug = True
@@ -231,3 +130,107 @@ def get_config():
     config.async_cache = True
 
     return config
+
+
+def get_num_repeats(img_key, img_md, **kwargs):
+    r"""
+    提高弱势类别数据的训练权重，以及图片高质量图像的权重。
+    """
+    artist_benchmark = 100
+    character_benchmark = 1000
+    min_num_repeats = 1
+    max_num_repeats = 10
+
+    counter = kwargs.get('counter')  # 获取计数器
+
+    num_repeats = 1
+
+    artist = fmt2danbooru(img_md['artist'])
+    if artist is not None:
+        cnt = counter['artist'][artist]
+        if cnt >= 25:
+            num_repeats *= max(1, artist_benchmark / cnt)
+
+    characters = fmt2danbooru(img_md['characters'])
+    if characters is not None:
+        for character in characters:
+            cnt = counter['character'][character]
+            if cnt >= 50:
+                num_repeats *= max(1, character_benchmark / cnt)
+
+    quality = img_md.get('quality')
+    if quality in ('horrible', 'worst', 'low'):
+        return 0  # 不训练
+    elif quality in QUALITY2NRP:
+        num_repeats *= QUALITY2NRP[quality]
+
+    num_repeats = int(num_repeats)
+    num_repeats = min(max_num_repeats, num_repeats)
+    num_repeats = max(min_num_repeats, num_repeats)
+    return num_repeats
+
+
+SAFE2TAG = {
+    'g': 'rating: general, safe',
+    's': 'rating: sensitive',
+    'q': 'rating: questionable',
+    'e': 'rating: explicit, nsfw',
+}
+
+
+def process_caption(img_info, **kwargs):
+    r"""
+    按以下方式处理标签：
+    - 如果图像水平翻转，将标签中的“左”和“右”互换
+    - 按照图像的原图尺寸，添加缩略图和低分辨率标签
+    - 按照图像的安全评级，添加安全评级标签
+    - 如果艺术家标签出现频率过高，则以一定概率移除之
+    - 解析并还原艺术家、角色和风格标签
+    """
+    artist_benchmark = 100
+    character_benchmark = 1000
+    caption = img_info.caption
+    tags = caption.split(', ')
+
+    if (flip_aug := kwargs.get('flip_aug', False)):
+        tags = [tag.replace('left', 'right').replace('right', 'left') for tag in tags]
+
+    if (original_size := img_info.original_size):
+        original_area = original_size[0] * original_size[1]
+        if original_area <= 256*256:
+            tags.append('thumbnail')
+        elif original_area <= 640*640:
+            tags.append('lowres')
+
+    if (safe_level := img_info.safe_level) and safe_level in SAFE2TAG:
+        tags.extend(SAFE2TAG[safe_level].split(', '))
+
+    counter = kwargs['counter']
+    if (artist := img_info.metadata.get('artist')) and (cnt := counter[fmt2danbooru(artist)]) > artist_benchmark:
+        artist_tag = f'artist: {artist}'
+        if artist_tag in tags and random.random() > artist_benchmark / cnt:
+            tags.remove(artist_tag)
+
+    tags = [tag.split(':')[1].strip() for tag in tags if tag.startswith(('character:', 'style:'))]
+    tags = ['by ' + tag.split(':')[1].strip() for tag in tags if tag.startswith('artist:')]
+
+    return ', '.join(tags)
+
+
+def fmt2dan(tag):
+    if isinstance(tag, str):
+        tag = tag.lower().strip()
+        tag = tag.replace(' ', '_').replace('\\(', '(').replace('\\)', ')').replace(': ', ':')
+        return tag
+    elif isinstance(tag, list):
+        return [fmt2dan(t) for t in tag]
+    else:
+        return tag
+
+
+QUALITY2NRP = {
+    'amazing': 5,
+    'best': 2.5,
+    'high': 1.5,
+    'normal': 1,
+}

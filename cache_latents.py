@@ -17,7 +17,7 @@ def cache_latents(
         mixed_precision=config.mixed_precision,
         cpu=config.cpu,
     )
-    logger = log_utils.get_logger("cache latents")
+    logger = log_utils.get_logger("cache")
     device = torch.device("cuda" if torch.cuda.is_available() and not config.cpu else "cpu")
     latents_dtype = torch.float32
     if config.mixed_precision == "fp16":

@@ -16,7 +16,6 @@ from modules.sdxl_lpw_stable_diffusion import SdxlStableDiffusionLongPromptWeigh
 
 def train(argv):
     config = flags.FLAGS.config
-    config.output_dir = log_utils.smart_path(os.path.dirname(config.output_dir), os.path.basename(config.output_dir))
     # torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=5400))
     accelerator = sdxl_train_utils.prepare_accelerator(config)
 
@@ -25,6 +24,8 @@ def train(argv):
     num_processes = accelerator.state.num_processes
 
     logger = log_utils.get_logger("train", disable=not is_main_process)
+    for lg in log_utils.get_all_loggers().values():
+        lg.disable = not is_main_process
 
     # mixed precisionに対応した型を用意しておき適宜castする
     weight_dtype, save_dtype = sdxl_train_utils.prepare_dtype(config)

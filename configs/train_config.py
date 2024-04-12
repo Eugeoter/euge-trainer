@@ -12,13 +12,14 @@ def get_config():
     config.pretrained_model_name_or_path = r'/path/to/your/model.safetensors'
     config.image_dirs = [r'/path/to/your/images']
     config.metadata_files = []
-    config.output_dir = 'train-%index%'
+    config.output_dir = 'train-1'
 
     # Model Parameters
     config.vae = None
 
     config.no_half_vae = False
     config.tokenizer_cache_dir = 'tokenizers'
+    config.records_cache_dir = 'records'
 
     # Dataset Parameters
     config.flip_aug = True

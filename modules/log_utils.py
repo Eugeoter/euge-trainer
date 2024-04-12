@@ -132,22 +132,28 @@ class ConsoleLogger:
 
     @property
     def prefix(self):
-        return f"[{stylize(self.prefix_str, self.color)}] " if self.prefix_str else ""
+        return f"[{stylize(self.prefix_str, self.color)}]" if self.prefix_str else ""
 
-    def print(self, msg: str, *args, no_prefix=False, disable=None, **kwargs):
+    def print(self, *msg: str, no_prefix=False, disable=None, **kwargs):
         disable = disable if disable is not None else self.disable
         if not disable:
-            print(f"{self.prefix if not no_prefix else ''}{msg}", *args, **kwargs)
+            if not no_prefix:
+                msg = (self.prefix,) + msg
+            print(*msg, **kwargs)
 
     def tqdm(self, *args, no_prefix=False, **kwargs):
         from tqdm import tqdm
-        kwargs["desc"] = f"{self.prefix if not no_prefix else ''}{kwargs.get('desc', '')}"
+        kwargs["desc"] = f"{self.prefix + ' ' if not no_prefix else ''}{kwargs.get('desc', '')}"
         kwargs["disable"] = kwargs['disable'] if 'disable' in kwargs else self.disable
         return tqdm(*args, **kwargs)
 
 
 def get_logger(name, prefix_str=None, color=None, disable: bool = False):
     return ConsoleLogger(name, prefix_str, color, disable)
+
+
+def get_all_loggers():
+    return ConsoleLogger._loggers
 
 
 def smart_path(root, name, exts=tuple()):

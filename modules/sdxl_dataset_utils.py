@@ -12,7 +12,7 @@ from PIL import Image, ExifTags
 from typing import List, Tuple, Optional, Union
 from torchvision import transforms
 from concurrent.futures import ThreadPoolExecutor, wait
-from . import custom_train_utils, log_utils
+from . import log_utils
 
 SDXL_BUCKET_RESOS = [
     (512, 1856), (512, 1920), (512, 1984), (512, 2048),
@@ -267,7 +267,7 @@ class Dataset(torch.utils.data.Dataset):
     ):
         self.image_dirs = [Path(image_dir).absolute() for image_dir in config.image_dirs]
         self.metadata_files = [Path(metadata_file).absolute() for metadata_file in config.metadata_files]
-        self.recording_dir = Path(config.output_dir) / "records"
+        self.records_dir = Path(config.records_cache_dir).absolute() if config.records_cache_dir else None
         self.batch_size = config.batch_size
         self.tokenizer1 = tokenizer1
         self.tokenizer2 = tokenizer2
@@ -297,7 +297,7 @@ class Dataset(torch.utils.data.Dataset):
         self.buckets = {}
         self.batches = []
 
-        self.logger = log_utils.get_logger("dataset" if not self.cache_only else "cache latents", disable=not is_main_process)
+        self.logger = log_utils.get_logger("dataset" if not self.cache_only else "cache", disable=not is_main_process)
 
         # for accelerating searching
         stem2files = {}
@@ -309,11 +309,11 @@ class Dataset(torch.utils.data.Dataset):
             file_cnt += len(imfiles)
             for p in imfiles:
                 stem2files.setdefault(p.stem, []).append(p)
-        self.logger.print(f"indexed {log_utils.yellow(file_cnt)} files in {log_utils.yellow(len(stem2files))} stems")
+        self.logger.print(f"num_files: {log_utils.yellow(file_cnt)} | num_stems: {log_utils.yellow(len(stem2files))}")
 
         self.metadata = {}
         if self.metadata_files:
-            self.logger.print(f"loading metadata from metadata files: {self.metadata_files}")
+            self.logger.print(f"load from metadata files:\n  " + '\n  '.join([f"{str(metadata_file)}" for metadata_file in self.metadata_files]))
             for metadata_file in self.metadata_files:
                 if metadata_file.is_file():
                     with open(metadata_file, "r") as f:
@@ -322,7 +322,7 @@ class Dataset(torch.utils.data.Dataset):
                 else:
                     raise FileNotFoundError(f"metadata file not found: {metadata_file}")
         else:
-            self.logger.print(f"no metadata file found. loading metadata from image files.")
+            self.logger.print(f"load from image dirs:\n  " + '\n  '.join([f"{str(img_dir)}" for img_dir in self.image_dirs]))
             for stem, files in stem2files.items():
                 files = [file for file in files if file.suffix in img_exts]
                 assert len(files) == 1, f"multiple image files found for stem `{stem}`: {files}"
@@ -340,27 +340,27 @@ class Dataset(torch.utils.data.Dataset):
         self.num_train_repeats = 0
 
         if self.cache_only:
-            self.logger.print(log_utils.magenta(f"run in `cache_only` mode. `num_repeats` will be fixed to 1."))
+            self.logger.print(f"run in `cache_only` mode. `num_repeats` will be fixed to 1.")
 
         # load img_size_record
-        if self.recording_dir:
-            img_sz_log_path = self.recording_dir / "image_size.json"
+        if self.records_dir:
+            img_size_log_path = self.records_dir / "image_size.json"
             img_size_record = {}
-            if img_sz_log_path.is_file():
+            if img_size_log_path.is_file():
                 try:
-                    with open(img_sz_log_path) as f:
+                    with open(img_size_log_path) as f:
                         img_size_record = json.load(f)
-                    self.logger.print(log_utils.green(f"applied existing `image size` record: {img_sz_log_path} | size: {log_utils.yellow(len(img_size_record))}"))
+                    self.logger.print(f"applied existing `image size` record: {img_size_log_path} | size: {log_utils.yellow(len(img_size_record))}")
                 except json.JSONDecodeError:
                     img_size_record = {}
-                    self.logger.print(log_utils.red(f"failed to load `image size` record: {img_sz_log_path}"))
+                    self.logger.print(log_utils.red(f"failed to load `image size` record: {img_size_log_path}"))
             else:
-                self.logger.print(log_utils.yellow(f"no existing `image size` record found: {img_sz_log_path}"))
+                self.logger.print(log_utils.yellow(f"no existing `image size` record found: {img_size_log_path}"))
 
-            n_rep_log_path = self.recording_dir / "num_repeats.json"
+            n_rep_log_path = self.records_dir / "num_repeats.json"
             num_repeats_record = {}
 
-        self.counter = custom_train_utils.count_metadata(self.metadata)
+        self.counter = count_metadata(self.metadata)
 
         pbar = self.logger.tqdm(total=len(self.metadata), desc=f"loading dataset")
         logs = {}
@@ -376,7 +376,7 @@ class Dataset(torch.utils.data.Dataset):
             # 1.1 search from metadata
             if img_path := img_md.get('image_path'):
                 if '\\' in img_path:
-                    img_path = img_path.replace('\\', '/')
+                    img_md['image_path'] = img_path = img_path.replace('\\', '/')
                 img_ext = os.path.splitext(img_path)[-1]
                 if os.path.exists(img_path):
                     img_path = Path(img_path)
@@ -418,7 +418,7 @@ class Dataset(torch.utils.data.Dataset):
             bucket_reso = None
             if image_size:  # if image_size is provided, pass
                 pass
-            elif self.recording_dir and img_key in img_size_record:  # if image_size is cached, use it
+            elif self.records_dir and img_key in img_size_record:  # if image_size is cached, use it
                 image_size = tuple(img_size_record[img_key])
             elif img_path is not None and (not npz_path or (npz_path and self.check_cache_validity)):  # if image_size is not provided, try to read from image file
                 image_size = get_image_size(img_path)
@@ -432,7 +432,7 @@ class Dataset(torch.utils.data.Dataset):
             original_size = img_md.get('original_size', None)
 
             # 5. record and log
-            if self.recording_dir:
+            if self.records_dir:
                 num_repeats_record[img_key] = num_repeats
                 img_size_record[img_key] = image_size
 
@@ -483,17 +483,17 @@ class Dataset(torch.utils.data.Dataset):
             self.logger.print(f"quality counter:", ' | '.join([f"{k}: {log_utils.yellow(v)}" for k, v in self.counter['quality'].items()]))
             self.logger.print(
                 f"num_captioned: {log_utils.yellow(log_counter['caption'])}/{len(self.image_data)} | num_described: {log_utils.yellow(log_counter['description'])}/{len(self.image_data)} | num_missing: {log_utils.yellow(log_counter['missing'])}/{len(self.metadata)}")
-            if self.recording_dir:
+            if self.records_dir:
                 n_rep_log_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(n_rep_log_path, 'w') as f:
                     json.dump(num_repeats_record, f)
-                img_sz_log_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(img_sz_log_path, 'w') as f:
+                img_size_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(img_size_log_path, 'w') as f:
                     json.dump(img_size_record, f)
-                self.logger.print(f"records saved to `{log_utils.yellow(self.recording_dir)}`")
+                self.logger.print(f"records to: `{log_utils.yellow(self.records_dir)}`")
 
         # count metadata again
-        self.counter = custom_train_utils.count_metadata(self.metadata)
+        self.counter = count_metadata(self.metadata)
 
         self.make_buckets()
         self.make_batches()
@@ -882,7 +882,7 @@ def check_cached_latents(image_info, latents):
         return False
     bucket_reso_hw = (image_info.bucket_size[1], image_info.bucket_size[0])
     latents_hw = (latents.shape[1]*8, latents.shape[2]*8)
-    assert latents_hw[0] > 128 and latents_hw[1] > 128, f"latents_hw must be larger than 128, but got latents_hw: {latents_hw}"
+    # assert latents_hw[0] > 128 and latents_hw[1] > 128, f"latents_hw must be larger than 128, but got latents_hw: {latents_hw}"
     # print(f"  bucket_reso_hw: {bucket_reso_hw} | latents_hw: {latents_hw}")
     return latents_hw == bucket_reso_hw
 
@@ -1034,3 +1034,55 @@ def get_input_ids(caption, tokenizer, max_token_length):
 
         input_ids = torch.stack(iids_list)  # 3,77
         return input_ids
+
+
+def fmt2dan(tag):
+    if isinstance(tag, str):
+        tag = tag.lower().strip()
+        tag = tag.replace(' ', '_').replace('\\(', '(').replace('\\)', ')').replace(': ', ':')
+        return tag
+    elif isinstance(tag, list):
+        return [fmt2dan(t) for t in tag]
+    else:
+        return tag
+
+
+def count_metadata(metadata):
+    counter = {
+        "category": {},
+        "artist": {},
+        "character": {},
+        "style": {},
+        "quality": {},
+    }
+    for img_key, img_md in metadata.items():
+        num_repeats = img_md.get('num_repeats', 1)
+        category = os.path.basename(os.path.dirname(img_md['image_path']))
+        if category not in counter["category"]:
+            counter["category"][category] = 0
+        counter["category"][category] += num_repeats
+
+        artist, characters, styles, quality = img_md.get('artist'), img_md.get('characters'), img_md.get('styles'), img_md.get('quality')
+
+        if artist:
+            artist = fmt2dan(artist)
+            if artist not in counter["artist"]:
+                counter["artist"][artist] = 0
+            counter["artist"][artist] += num_repeats
+        if characters:
+            for character in characters.split(', '):
+                character = fmt2dan(character)
+                if character not in counter["character"]:
+                    counter["character"][character] = 0
+                counter["character"][character] += num_repeats
+        if styles:
+            for style in styles.split(', '):
+                style = fmt2dan(style)
+                if style not in counter["style"]:
+                    counter["style"][style] = 0
+                counter["style"][style] += num_repeats
+        if quality:
+            if quality not in counter["quality"]:
+                counter["quality"][quality] = 0
+            counter["quality"][quality] += num_repeats
+    return counter

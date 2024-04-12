@@ -3,6 +3,10 @@ import random
 import re
 import math
 from typing import List, Optional, Union
+from . import log_utils
+
+
+logger = log_utils.get_logger("advanced")
 
 
 def prepare_scheduler_for_custom_training(noise_scheduler, device):
@@ -21,7 +25,7 @@ def prepare_scheduler_for_custom_training(noise_scheduler, device):
 
 def fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler):
     # fix beta: zero terminal SNR
-    print(f"fix noise scheduler betas: https://arxiv.org/abs/2305.08891")
+    logger.print(f"fix noise scheduler betas: https://arxiv.org/abs/2305.08891")
 
     def enforce_zero_terminal_snr(betas):
         # Convert betas to alphas_bar_sqrt
@@ -49,8 +53,8 @@ def fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler):
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
 
-    # print("original:", noise_scheduler.betas)
-    # print("fixed:", betas)
+    # logger.print("original:", noise_scheduler.betas)
+    # logger.print("fixed:", betas)
 
     noise_scheduler.betas = betas
     noise_scheduler.alphas = alphas
@@ -103,13 +107,13 @@ def get_snr_scale(timesteps, noise_scheduler):
     snr_t = torch.minimum(snr_t, torch.ones_like(snr_t) * 1000)  # if timestep is 0, snr_t is inf, so limit it to 1000
     scale = snr_t / (snr_t + 1)
     # # show debug info
-    # print(f"timesteps: {timesteps}, snr_t: {snr_t}, scale: {scale}")
+    # logger.print(f"timesteps: {timesteps}, snr_t: {snr_t}, scale: {scale}")
     return scale
 
 
 def add_v_prediction_like_loss(loss, timesteps, noise_scheduler, v_pred_like_loss):
     scale = get_snr_scale(timesteps, noise_scheduler)
-    # print(f"add v-prediction like loss: {v_pred_like_loss}, scale: {scale}, loss: {loss}, time: {timesteps}")
+    # logger.print(f"add v-prediction like loss: {v_pred_like_loss}, scale: {scale}, loss: {loss}, time: {timesteps}")
     loss = loss + loss / scale * v_pred_like_loss
     return loss
 
@@ -259,7 +263,7 @@ def get_prompts_with_weights(tokenizer, prompt: List[str], max_length: int):
         tokens.append(text_token)
         weights.append(text_weight)
     if truncated:
-        print("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples")
+        logger.print("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples")
     return tokens, weights
 
 

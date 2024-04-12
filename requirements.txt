@@ -11,4 +11,7 @@ safetensors
 accelerate
 einops
 bitsandbytes==0.39.1
+tensorboard
+absl-py
+ml-collections
 # lion_pytorch

@@ -170,3 +170,5 @@ wandb/
 *_dev*.py
 *_deprecated*.py
 *_test*.py
+modules/custom_*
+configs/my/
