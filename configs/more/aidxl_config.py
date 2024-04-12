@@ -13,7 +13,7 @@ def get_config():
     config.pretrained_model_name_or_path = r'/path/to/your/model.safetensors'
     config.image_dirs = [r'/path/to/your/images']
     config.metadata_files = []
-    config.output_dir = 'train-%index%'
+    config.output_dir = 'train-1'
 
     # Model Parameters
     config.vae = None
@@ -145,13 +145,13 @@ def get_num_repeats(img_key, img_md, **kwargs):
 
     num_repeats = 1
 
-    artist = fmt2danbooru(img_md['artist'])
+    artist = fmt2dan(img_md['artist'])
     if artist is not None:
         cnt = counter['artist'][artist]
         if cnt >= 25:
             num_repeats *= max(1, artist_benchmark / cnt)
 
-    characters = fmt2danbooru(img_md['characters'])
+    characters = fmt2dan(img_md['characters'])
     if characters is not None:
         for character in characters:
             cnt = counter['character'][character]
@@ -206,7 +206,7 @@ def process_caption(img_info, **kwargs):
         tags.extend(SAFE2TAG[safe_level].split(', '))
 
     counter = kwargs['counter']
-    if (artist := img_info.metadata.get('artist')) and (cnt := counter[fmt2danbooru(artist)]) > artist_benchmark:
+    if (artist := img_info.metadata.get('artist')) and (cnt := counter[fmt2dan(artist)]) > artist_benchmark:
         artist_tag = f'artist: {artist}'
         if artist_tag in tags and random.random() > artist_benchmark / cnt:
             tags.remove(artist_tag)

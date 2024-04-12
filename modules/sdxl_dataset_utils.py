@@ -84,174 +84,6 @@ class ImageInfo:
         )
 
 
-def search_image_file(image_dir, image_key):
-    image_key, ext = os.path.splitext(image_key)
-    if ext != '':
-        image_file = os.path.join(image_dir, f"{image_key}{ext}")
-        if os.path.isfile(image_file):
-            image_path = os.path.abspath(image_file)
-            return image_path
-        else:
-            image_path = None
-    for ext in IMAGE_EXTENSIONS:
-        image_file = os.path.join(image_dir, f"{image_key}{ext}")
-        if os.path.isfile(image_file):
-            image_path = os.path.abspath(image_file)
-            break
-    else:
-        image_path = None
-    return image_path
-
-
-def search_cache_file(cache_dir, image_key):
-    cache_file = os.path.join(cache_dir, f"{image_key}.npz")
-    if os.path.isfile(cache_file):
-        cache_path = os.path.abspath(cache_file)
-    else:
-        cache_path = None
-    return cache_path
-
-
-def search_file(paths, exts):
-    for path in paths:
-        if path.suffix in exts:
-            return path
-
-
-def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Optional[int] = None) -> Tuple[int, int]:
-    r"""
-    w*h = reso*reso
-    w/h = img_w/img_h
-    => w = img_ar*h
-    => img_ar*h^2 = reso
-    => h = sqrt(reso / img_ar)
-    """
-    reso = reso if isinstance(reso, tuple) else (reso, reso)
-    divisible = divisible or 1
-    img_ar = img_w / img_h
-    around_h = int(math.sqrt(reso[0]*reso[1] /
-                   img_ar) // divisible * divisible)
-    around_w = int(img_ar * around_h // divisible * divisible)
-    return (around_w, around_h)
-
-
-def aspect_ratio_diff(size_1: Tuple[int, int], size_2: Tuple[int, int]):
-    ar_1 = size_1[0] / size_1[1]
-    ar_2 = size_2[0] / size_2[1]
-    return max(ar_1/ar_2, ar_2/ar_1)
-
-
-def rotate_image_straight(image: Image) -> Image:
-    exif: Image.Exif = image.getexif()
-    if exif:
-        orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}[
-            'Orientation']
-        orientation = exif.get(orientation_tag)
-        degree = {
-            3: 180,
-            6: 270,
-            8: 90,
-        }.get(orientation)
-        if degree:
-            image = image.rotate(degree, expand=True)
-    return image
-
-
-def closest_resolution(buckets: List[Tuple[int, int]], size: Tuple[int, int]) -> Tuple[int, int]:
-    img_ar = size[0] / size[1]
-
-    def distance(reso: Tuple[int, int]) -> float:
-        return abs(img_ar - reso[0]/reso[1])
-
-    return min(buckets, key=distance)
-
-
-def get_bucket_reso(
-    image_size: Tuple[int, int],
-    buckets: Optional[List[Tuple[int, int]]] = SDXL_BUCKET_RESOS,
-    max_resolution: Optional[Union[Tuple[int, int], int]] = 1024,
-    max_aspect_ratio: Optional[float] = 1.1,
-    divisible: Optional[int] = 32
-):
-    r"""
-    Get the closest resolution to the image's resolution from the buckets. If the image's aspect ratio is too
-    different from the closest resolution, then return the around resolution based on the max resolution.
-    :param image: The image to be resized.
-    :param buckets: The buckets of resolutions to choose from. Default to SDXL_BUCKETS. Set None to use max_resolution.
-    :param max_resolution: The max resolution to be used to calculate the around resolution. It's used to calculate the 
-        around resolution when `buckets` is None or no bucket can contain that image without exceeding the max aspect ratio.
-        Default to 1024. Set `-1` to auto calculate from the buckets' max resolution. Set None to disable.
-        Set None to auto calculate from the buckets' max resolution.
-    :param max_aspect_ratio: The max aspect ratio difference between the image and the closest resolution. Default to 1.1.
-        Set None to disable.
-    :param divisible: The divisible number of bucket resolutions. Default to 32.
-    :return: The closest resolution to the image's resolution.
-    """
-    if not buckets and (not max_resolution or max_resolution == -1):
-        raise ValueError(
-            "Either `buckets` or `max_resolution` must be provided.")
-
-    img_w, img_h = image_size
-    clo_reso = closest_resolution(buckets, image_size) if buckets else around_reso(
-        img_w, img_h, reso=max_resolution, divisible=divisible)
-    max_resolution = max(
-        buckets, key=lambda x: x[0]*x[1]) if buckets and max_resolution == -1 else max_resolution
-
-    # Handle special resolutions
-    if img_w < clo_reso[0] or img_h < clo_reso[1]:
-        new_w = img_w // divisible * divisible
-        new_h = img_h // divisible * divisible
-        clo_reso = (new_w, new_h)
-    elif max_aspect_ratio and aspect_ratio_diff((img_w, img_h), clo_reso) >= max_aspect_ratio:
-        if buckets and max_resolution:
-            clo_reso = around_reso(
-                img_w, img_h, reso=max_resolution, divisible=divisible)
-        else:
-            log_utils.warn(
-                f"An image has aspect ratio {img_w/img_h:.2f} which is too different from the closest resolution {clo_reso[0]/clo_reso[1]}. You may lower the `divisible` to avoid this.")
-
-    return clo_reso
-
-
-def caption2metadata(caption):
-    tags = caption.split(',')
-    tags = [tag.strip() for tag in tags]
-    metadata = {
-        'caption': caption,
-    }
-    for tag in tags:
-        if tag.startswith('artist:'):
-            metadata['artist'] = tag[7:].strip()
-        elif tag.startswith('character:'):
-            metadata.setdefault('characters', []).append(tag[10:].strip())
-        elif tag.startswith('style:'):
-            metadata.setdefault('styles', []).append(tag[6:].strip())
-        elif 'quality' in tag:
-            metadata['quality'] = tag.replace('quality', '').strip()
-    if 'characters' in metadata:
-        metadata['characters'] = ', '.join(metadata['characters'])
-    if 'styles' in metadata:
-        metadata['styles'] = ', '.join(metadata['styles'])
-    return metadata
-
-
-def empty_metadata():
-    return {
-        'image_path': None,
-        'caption': None,
-        'description': None,
-        'artist': None,
-        'characters': None,
-        'styles': None,
-        'quality': None,
-        'original_size': None,
-        'safe_rating': None,
-        'safe_level': None,
-        'perceptual_hash': None,
-        'aesthetic_score': None,
-    }
-
-
 class Dataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -313,7 +145,7 @@ class Dataset(torch.utils.data.Dataset):
 
         self.metadata = {}
         if self.metadata_files:
-            self.logger.print(f"load from metadata files:\n  " + '\n  '.join([f"{str(metadata_file)}" for metadata_file in self.metadata_files]))
+            self.logger.print(f"load from metadata files:\n  " + '\n  '.join([log_utils.yellow(str(metadata_file)) for metadata_file in self.metadata_files]))
             for metadata_file in self.metadata_files:
                 if metadata_file.is_file():
                     with open(metadata_file, "r") as f:
@@ -322,7 +154,7 @@ class Dataset(torch.utils.data.Dataset):
                 else:
                     raise FileNotFoundError(f"metadata file not found: {metadata_file}")
         else:
-            self.logger.print(f"load from image dirs:\n  " + '\n  '.join([f"{str(img_dir)}" for img_dir in self.image_dirs]))
+            self.logger.print(f"load from image dirs:\n  " + '\n  '.join([log_utils.yellow(str(img_dir)) for img_dir in self.image_dirs]))
             for stem, files in stem2files.items():
                 files = [file for file in files if file.suffix in img_exts]
                 assert len(files) == 1, f"multiple image files found for stem `{stem}`: {files}"
@@ -801,6 +633,174 @@ def listdir(
         files = [return_type(f) for f in files]
 
     return files
+
+
+def search_image_file(image_dir, image_key):
+    image_key, ext = os.path.splitext(image_key)
+    if ext != '':
+        image_file = os.path.join(image_dir, f"{image_key}{ext}")
+        if os.path.isfile(image_file):
+            image_path = os.path.abspath(image_file)
+            return image_path
+        else:
+            image_path = None
+    for ext in IMAGE_EXTENSIONS:
+        image_file = os.path.join(image_dir, f"{image_key}{ext}")
+        if os.path.isfile(image_file):
+            image_path = os.path.abspath(image_file)
+            break
+    else:
+        image_path = None
+    return image_path
+
+
+def search_cache_file(cache_dir, image_key):
+    cache_file = os.path.join(cache_dir, f"{image_key}.npz")
+    if os.path.isfile(cache_file):
+        cache_path = os.path.abspath(cache_file)
+    else:
+        cache_path = None
+    return cache_path
+
+
+def search_file(paths, exts):
+    for path in paths:
+        if path.suffix in exts:
+            return path
+
+
+def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Optional[int] = None) -> Tuple[int, int]:
+    r"""
+    w*h = reso*reso
+    w/h = img_w/img_h
+    => w = img_ar*h
+    => img_ar*h^2 = reso
+    => h = sqrt(reso / img_ar)
+    """
+    reso = reso if isinstance(reso, tuple) else (reso, reso)
+    divisible = divisible or 1
+    img_ar = img_w / img_h
+    around_h = int(math.sqrt(reso[0]*reso[1] /
+                   img_ar) // divisible * divisible)
+    around_w = int(img_ar * around_h // divisible * divisible)
+    return (around_w, around_h)
+
+
+def aspect_ratio_diff(size_1: Tuple[int, int], size_2: Tuple[int, int]):
+    ar_1 = size_1[0] / size_1[1]
+    ar_2 = size_2[0] / size_2[1]
+    return max(ar_1/ar_2, ar_2/ar_1)
+
+
+def rotate_image_straight(image: Image) -> Image:
+    exif: Image.Exif = image.getexif()
+    if exif:
+        orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}[
+            'Orientation']
+        orientation = exif.get(orientation_tag)
+        degree = {
+            3: 180,
+            6: 270,
+            8: 90,
+        }.get(orientation)
+        if degree:
+            image = image.rotate(degree, expand=True)
+    return image
+
+
+def closest_resolution(buckets: List[Tuple[int, int]], size: Tuple[int, int]) -> Tuple[int, int]:
+    img_ar = size[0] / size[1]
+
+    def distance(reso: Tuple[int, int]) -> float:
+        return abs(img_ar - reso[0]/reso[1])
+
+    return min(buckets, key=distance)
+
+
+def get_bucket_reso(
+    image_size: Tuple[int, int],
+    buckets: Optional[List[Tuple[int, int]]] = SDXL_BUCKET_RESOS,
+    max_resolution: Optional[Union[Tuple[int, int], int]] = 1024,
+    max_aspect_ratio: Optional[float] = 1.1,
+    divisible: Optional[int] = 32
+):
+    r"""
+    Get the closest resolution to the image's resolution from the buckets. If the image's aspect ratio is too
+    different from the closest resolution, then return the around resolution based on the max resolution.
+    :param image: The image to be resized.
+    :param buckets: The buckets of resolutions to choose from. Default to SDXL_BUCKETS. Set None to use max_resolution.
+    :param max_resolution: The max resolution to be used to calculate the around resolution. It's used to calculate the 
+        around resolution when `buckets` is None or no bucket can contain that image without exceeding the max aspect ratio.
+        Default to 1024. Set `-1` to auto calculate from the buckets' max resolution. Set None to disable.
+        Set None to auto calculate from the buckets' max resolution.
+    :param max_aspect_ratio: The max aspect ratio difference between the image and the closest resolution. Default to 1.1.
+        Set None to disable.
+    :param divisible: The divisible number of bucket resolutions. Default to 32.
+    :return: The closest resolution to the image's resolution.
+    """
+    if not buckets and (not max_resolution or max_resolution == -1):
+        raise ValueError(
+            "Either `buckets` or `max_resolution` must be provided.")
+
+    img_w, img_h = image_size
+    clo_reso = closest_resolution(buckets, image_size) if buckets else around_reso(
+        img_w, img_h, reso=max_resolution, divisible=divisible)
+    max_resolution = max(
+        buckets, key=lambda x: x[0]*x[1]) if buckets and max_resolution == -1 else max_resolution
+
+    # Handle special resolutions
+    if img_w < clo_reso[0] or img_h < clo_reso[1]:
+        new_w = img_w // divisible * divisible
+        new_h = img_h // divisible * divisible
+        clo_reso = (new_w, new_h)
+    elif max_aspect_ratio and aspect_ratio_diff((img_w, img_h), clo_reso) >= max_aspect_ratio:
+        if buckets and max_resolution:
+            clo_reso = around_reso(
+                img_w, img_h, reso=max_resolution, divisible=divisible)
+        else:
+            log_utils.warn(
+                f"An image has aspect ratio {img_w/img_h:.2f} which is too different from the closest resolution {clo_reso[0]/clo_reso[1]}. You may lower the `divisible` to avoid this.")
+
+    return clo_reso
+
+
+def caption2metadata(caption):
+    tags = caption.split(',')
+    tags = [tag.strip() for tag in tags]
+    metadata = {
+        'caption': caption,
+    }
+    for tag in tags:
+        if tag.startswith('artist:'):
+            metadata['artist'] = tag[7:].strip()
+        elif tag.startswith('character:'):
+            metadata.setdefault('characters', []).append(tag[10:].strip())
+        elif tag.startswith('style:'):
+            metadata.setdefault('styles', []).append(tag[6:].strip())
+        elif 'quality' in tag:
+            metadata['quality'] = tag.replace('quality', '').strip()
+    if 'characters' in metadata:
+        metadata['characters'] = ', '.join(metadata['characters'])
+    if 'styles' in metadata:
+        metadata['styles'] = ', '.join(metadata['styles'])
+    return metadata
+
+
+def empty_metadata():
+    return {
+        'image_path': None,
+        'caption': None,
+        'description': None,
+        'artist': None,
+        'characters': None,
+        'styles': None,
+        'quality': None,
+        'original_size': None,
+        'safe_rating': None,
+        'safe_level': None,
+        'perceptual_hash': None,
+        'aesthetic_score': None,
+    }
 
 
 def get_image_size(image_path):
