@@ -1,11 +1,9 @@
 import torch
 import math
-import psutil
 import os
 import time
 import gc
 import importlib
-import ast
 import transformers
 from accelerate import init_empty_weights, Accelerator
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextModelWithProjection
@@ -13,7 +11,9 @@ from torch.optim import Optimizer
 from torch.nn.parallel import DistributedDataParallel as DDP
 from typing import Optional, List
 from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION
-from . import advanced_train_utils, sdxl_original_unet, sdxl_model_utils, model_utils
+from . import advanced_train_utils, sdxl_original_unet, sdxl_model_utils, model_utils, log_utils
+
+logger = log_utils.get_logger("train")
 
 VAE_SCALE_FACTOR = 0.13025
 
@@ -101,14 +101,14 @@ def load_tokenizers(tokenizer_cache_dir=None, max_token_length=75):
         if tokenizer_cache_dir:
             local_tokenizer_path = os.path.join(tokenizer_cache_dir, original_path.replace("/", "_"))
             if os.path.exists(local_tokenizer_path):
-                print(f"load tokenizer from cache: {local_tokenizer_path}")
+                logger.print(f"load tokenizer from cache: {local_tokenizer_path}")
                 tokenizer = CLIPTokenizer.from_pretrained(local_tokenizer_path)
 
         if tokenizer is None:
             tokenizer = CLIPTokenizer.from_pretrained(original_path)
 
         if tokenizer_cache_dir and not os.path.exists(local_tokenizer_path):
-            print(f"save Tokenizer to cache: {local_tokenizer_path}")
+            logger.print(f"save Tokenizer to cache: {local_tokenizer_path}")
             tokenizer.save_pretrained(local_tokenizer_path)
 
         if i == 1:
@@ -117,7 +117,7 @@ def load_tokenizers(tokenizer_cache_dir=None, max_token_length=75):
         tokeniers.append(tokenizer)
 
     if max_token_length is not None:
-        print(f"update token length: {max_token_length}")
+        logger.print(f"update token length: {max_token_length}")
 
     return tokeniers
 
@@ -126,47 +126,46 @@ def collate_fn(batch):
     return batch[0]
 
 
-def prepare_accelerator(args):
-    if args.logging_dir is None:
-        logging_dir = None
-    else:
-        logging_dir = args.logging_dir + "/" + time.strftime("%Y%m%d%H%M%S", time.localtime())
+def prepare_accelerator(config):
+    log_dir = os.path.join(config.output_dir, 'logs')
+    log_dir = log_dir + "/" + time.strftime("%Y%m%d%H%M%S", time.localtime())
+    os.makedirs(log_dir, exist_ok=True)
 
     accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        mixed_precision=config.mixed_precision,
         log_with='tensorboard',
-        project_dir=logging_dir,
-        cpu=args.cpu,
+        project_dir=log_dir,
+        cpu=config.cpu,
     )
     return accelerator
 
 
-def prepare_dtype(args):
+def prepare_dtype(config):
     weight_dtype = torch.float32
-    if args.mixed_precision == "fp16":
+    if config.mixed_precision == "fp16":
         weight_dtype = torch.float16
-    elif args.mixed_precision == "bf16":
+    elif config.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
     save_dtype = None
-    if args.save_precision == "fp16":
+    if config.save_precision == "fp16":
         save_dtype = torch.float16
-    elif args.save_precision == "bf16":
+    elif config.save_precision == "bf16":
         save_dtype = torch.bfloat16
-    elif args.save_precision == "float":
+    elif config.save_precision == "float":
         save_dtype = torch.float32
 
     return weight_dtype, save_dtype
 
 
-def match_mixed_precision(args, weight_dtype):
-    if args.full_fp16:
+def match_mixed_precision(config, weight_dtype):
+    if config.full_fp16:
         assert (
             weight_dtype == torch.float16
         ), "full_fp16 requires mixed precision='fp16' / full_fp16を使う場合はmixed_precision='fp16'を指定してください。"
         return weight_dtype
-    elif args.full_bf16:
+    elif config.full_bf16:
         assert (
             weight_dtype == torch.bfloat16
         ), "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
@@ -175,12 +174,12 @@ def match_mixed_precision(args, weight_dtype):
         return None
 
 
-def load_target_model(args, accelerator, model_version: str, weight_dtype):
+def load_target_model(config, accelerator, model_version: str, weight_dtype):
     # load models for each process
-    model_dtype = match_mixed_precision(args, weight_dtype)  # prepare fp16/bf16
+    model_dtype = match_mixed_precision(config, weight_dtype)  # prepare fp16/bf16
     for pi in range(accelerator.state.num_processes):
         if pi == accelerator.state.local_process_index:
-            print(f"loading model for process {accelerator.state.local_process_index}/{accelerator.state.num_processes}")
+            logger.print(f"loading model for process {accelerator.state.local_process_index}/{accelerator.state.num_processes}")
 
             (
                 load_stable_diffusion_format,
@@ -191,8 +190,8 @@ def load_target_model(args, accelerator, model_version: str, weight_dtype):
                 logit_scale,
                 ckpt_info,
             ) = _load_target_model(
-                args.pretrained_model_name_or_path,
-                args.vae,
+                config.pretrained_model_name_or_path,
+                config.vae,
                 model_version,
                 weight_dtype,
                 accelerator.device,
@@ -200,7 +199,7 @@ def load_target_model(args, accelerator, model_version: str, weight_dtype):
             )
 
             # work on low-ram device
-            if args.cpu:
+            if config.cpu:
                 text_encoder1.to(accelerator.device)
                 text_encoder2.to(accelerator.device)
                 unet.to(accelerator.device)
@@ -221,7 +220,7 @@ def _load_target_model(
     load_stable_diffusion_format = os.path.isfile(name_or_path)  # determine SD or Diffusers
 
     if load_stable_diffusion_format:
-        print(f"load StableDiffusion checkpoint: {name_or_path}")
+        logger.print(f"load StableDiffusion checkpoint: {name_or_path}")
         (
             text_encoder1,
             text_encoder2,
@@ -235,7 +234,7 @@ def _load_target_model(
         from diffusers import StableDiffusionXLPipeline
 
         variant = "fp16" if weight_dtype == torch.float16 else None
-        print(f"load Diffusers pretrained models: {name_or_path}, variant={variant}")
+        logger.print(f"load Diffusers pretrained models: {name_or_path}, variant={variant}")
         try:
             try:
                 pipe = StableDiffusionXLPipeline.from_pretrained(
@@ -243,12 +242,12 @@ def _load_target_model(
                 )
             except EnvironmentError as ex:
                 if variant is not None:
-                    print("try to load fp32 model")
+                    logger.print("try to load fp32 model")
                     pipe = StableDiffusionXLPipeline.from_pretrained(name_or_path, variant=None, tokenizer=None)
                 else:
                     raise ex
         except EnvironmentError as ex:
-            print(
+            logger.print(
                 f"model is not found as a file or in Hugging Face, perhaps file name is wrong? / 指定したモデル名のファイル、またはHugging Faceのモデルが見つかりません。ファイル名が誤っているかもしれません: {name_or_path}"
             )
             raise ex
@@ -271,7 +270,7 @@ def _load_target_model(
         with init_empty_weights():
             unet = sdxl_original_unet.SdxlUNet2DConditionModel()  # overwrite unet
         sdxl_model_utils._load_state_dict_on_device(unet, state_dict, device=device, dtype=model_dtype)
-        print("U-Net converted to original U-Net")
+        logger.print("U-Net converted to original U-Net")
 
         logit_scale = None
         ckpt_info = None
@@ -279,7 +278,7 @@ def _load_target_model(
     # VAEを読み込む
     if vae_path is not None:
         vae = model_utils.load_vae(vae_path, weight_dtype)
-        print("additional VAE loaded")
+        logger.print("additional VAE loaded")
 
     return load_stable_diffusion_format, text_encoder1, text_encoder2, vae, unet, logit_scale, ckpt_info
 
@@ -297,10 +296,10 @@ def set_diffusers_xformers_flag(model, valid):
 
 def replace_unet_modules(unet, mem_eff_attn, xformers, sdpa):
     if mem_eff_attn:
-        print("Enable memory efficient attention for U-Net")
+        logger.print("Enable memory efficient attention for U-Net")
         unet.set_use_memory_efficient_attention(False, True)
     elif xformers:
-        print("Enable xformers for U-Net")
+        logger.print("Enable xformers for U-Net")
         try:
             import xformers.ops
         except ImportError:
@@ -308,7 +307,7 @@ def replace_unet_modules(unet, mem_eff_attn, xformers, sdpa):
 
         unet.set_use_memory_efficient_attention(True, False)
     elif sdpa:
-        print("Enable SDPA for U-Net")
+        logger.print("Enable SDPA for U-Net")
         unet.set_use_sdpa(True)
 
 
@@ -317,33 +316,13 @@ def transform_models_if_DDP(models):
     return [model.module if type(model) == DDP else model for model in models if model is not None]
 
 
-def get_optimizer(args, trainable_params):
+def get_optimizer(config, trainable_params):
     # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, PagedAdamW8bit, PagedAdamW32bit, Lion8bit, PagedLion8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
 
-    optimizer_type = args.optimizer_type.lower()
+    optimizer_type = config.optimizer_type.lower()
+    optimizer_kwargs = config.optimizer_kwargs
 
-    # 引数を分解する
-    optimizer_kwargs = {}
-    if args.optimizer_args is not None and len(args.optimizer_args) > 0:
-        for arg in args.optimizer_args:
-            key, value = arg.split("=")
-            value = ast.literal_eval(value)
-
-            # value = value.split(",")
-            # for i in range(len(value)):
-            #     if value[i].lower() == "true" or value[i].lower() == "false":
-            #         value[i] = value[i].lower() == "true"
-            #     else:
-            #         value[i] = ast.float(value[i])
-            # if len(value) == 1:
-            #     value = value[0]
-            # else:
-            #     value = tuple(value)
-
-            optimizer_kwargs[key] = value
-    print("optkwargs:", optimizer_kwargs)
-
-    lr = args.learning_rate
+    lr = config.learning_rate
     optimizer = None
 
     if optimizer_type == "Lion".lower():
@@ -351,7 +330,7 @@ def get_optimizer(args, trainable_params):
             import lion_pytorch
         except ImportError:
             raise ImportError("No lion_pytorch / lion_pytorch がインストールされていないようです")
-        print(f"use Lion optimizer | {optimizer_kwargs}")
+        logger.print(f"use Lion optimizer | {optimizer_kwargs}")
         optimizer_class = lion_pytorch.Lion
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
@@ -362,14 +341,14 @@ def get_optimizer(args, trainable_params):
             raise ImportError("No bitsandbytes / bitsandbytesがインストールされていないようです")
 
         if optimizer_type == "AdamW8bit".lower():
-            print(f"use 8-bit AdamW optimizer | {optimizer_kwargs}")
+            logger.print(f"use 8-bit AdamW optimizer | {optimizer_kwargs}")
             optimizer_class = bnb.optim.AdamW8bit
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
         elif optimizer_type == "SGDNesterov8bit".lower():
-            print(f"use 8-bit SGD with Nesterov optimizer | {optimizer_kwargs}")
+            logger.print(f"use 8-bit SGD with Nesterov optimizer | {optimizer_kwargs}")
             if "momentum" not in optimizer_kwargs:
-                print(
+                logger.print(
                     f"8-bit SGD with Nesterov must be with momentum, set momentum to 0.9 / 8-bit SGD with Nesterovはmomentum指定が必須のため0.9に設定します"
                 )
                 optimizer_kwargs["momentum"] = 0.9
@@ -378,7 +357,7 @@ def get_optimizer(args, trainable_params):
             optimizer = optimizer_class(trainable_params, lr=lr, nesterov=True, **optimizer_kwargs)
 
         elif optimizer_type == "Lion8bit".lower():
-            print(f"use 8-bit Lion optimizer | {optimizer_kwargs}")
+            logger.print(f"use 8-bit Lion optimizer | {optimizer_kwargs}")
             try:
                 optimizer_class = bnb.optim.Lion8bit
             except AttributeError:
@@ -386,7 +365,7 @@ def get_optimizer(args, trainable_params):
                     "No Lion8bit. The version of bitsandbytes installed seems to be old. Please install 0.38.0 or later. / Lion8bitが定義されていません。インストールされているbitsandbytesのバージョンが古いようです。0.38.0以上をインストールしてください"
                 )
         elif optimizer_type == "PagedAdamW8bit".lower():
-            print(f"use 8-bit PagedAdamW optimizer | {optimizer_kwargs}")
+            logger.print(f"use 8-bit PagedAdamW optimizer | {optimizer_kwargs}")
             try:
                 optimizer_class = bnb.optim.PagedAdamW8bit
             except AttributeError:
@@ -394,7 +373,7 @@ def get_optimizer(args, trainable_params):
                     "No PagedAdamW8bit. The version of bitsandbytes installed seems to be old. Please install 0.39.0 or later. / PagedAdamW8bitが定義されていません。インストールされているbitsandbytesのバージョンが古いようです。0.39.0以上をインストールしてください"
                 )
         elif optimizer_type == "PagedLion8bit".lower():
-            print(f"use 8-bit Paged Lion optimizer | {optimizer_kwargs}")
+            logger.print(f"use 8-bit Paged Lion optimizer | {optimizer_kwargs}")
             try:
                 optimizer_class = bnb.optim.PagedLion8bit
             except AttributeError:
@@ -405,7 +384,7 @@ def get_optimizer(args, trainable_params):
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     elif optimizer_type == "PagedAdamW32bit".lower():
-        print(f"use 32-bit PagedAdamW optimizer | {optimizer_kwargs}")
+        logger.print(f"use 32-bit PagedAdamW optimizer | {optimizer_kwargs}")
         try:
             import bitsandbytes as bnb
         except ImportError:
@@ -419,16 +398,16 @@ def get_optimizer(args, trainable_params):
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     elif optimizer_type == "SGDNesterov".lower():
-        print(f"use SGD with Nesterov optimizer | {optimizer_kwargs}")
+        logger.print(f"use SGD with Nesterov optimizer | {optimizer_kwargs}")
         if "momentum" not in optimizer_kwargs:
-            print(f"SGD with Nesterov must be with momentum, set momentum to 0.9 / SGD with Nesterovはmomentum指定が必須のため0.9に設定します")
+            logger.print(f"SGD with Nesterov must be with momentum, set momentum to 0.9 / SGD with Nesterovはmomentum指定が必須のため0.9に設定します")
             optimizer_kwargs["momentum"] = 0.9
 
         optimizer_class = torch.optim.SGD
         optimizer = optimizer_class(trainable_params, lr=lr, nesterov=True, **optimizer_kwargs)
 
     elif optimizer_type.startswith("DAdapt".lower()) or optimizer_type == "Prodigy".lower():
-        # check lr and lr_count, and print warning
+        # check lr and lr_count, and LOGGER.print warning
         actual_lr = lr
         lr_count = 1
         if type(trainable_params) == list and type(trainable_params[0]) == dict:
@@ -439,12 +418,12 @@ def get_optimizer(args, trainable_params):
             lr_count = len(lrs)
 
         if actual_lr <= 0.1:
-            print(
+            logger.print(
                 f"learning rate is too low. If using D-Adaptation or Prodigy, set learning rate around 1.0 / 学習率が低すぎるようです。D-AdaptationまたはProdigyの使用時は1.0前後の値を指定してください: lr={actual_lr}"
             )
-            print("recommend option: lr=1.0 / 推奨は1.0です")
+            logger.print("recommend option: lr=1.0 / 推奨は1.0です")
         if lr_count > 1:
-            print(
+            logger.print(
                 f"when multiple learning rates are specified with dadaptation (e.g. for Text Encoder and U-Net), only the first one will take effect / D-AdaptationまたはProdigyで複数の学習率を指定した場合（Text EncoderとU-Netなど）、最初の学習率のみが有効になります: lr={actual_lr}"
             )
 
@@ -460,25 +439,25 @@ def get_optimizer(args, trainable_params):
             # set optimizer
             if optimizer_type == "DAdaptation".lower() or optimizer_type == "DAdaptAdamPreprint".lower():
                 optimizer_class = experimental.DAdaptAdamPreprint
-                print(f"use D-Adaptation AdamPreprint optimizer | {optimizer_kwargs}")
+                logger.print(f"use D-Adaptation AdamPreprint optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptAdaGrad".lower():
                 optimizer_class = dadaptation.DAdaptAdaGrad
-                print(f"use D-Adaptation AdaGrad optimizer | {optimizer_kwargs}")
+                logger.print(f"use D-Adaptation AdaGrad optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptAdam".lower():
                 optimizer_class = dadaptation.DAdaptAdam
-                print(f"use D-Adaptation Adam optimizer | {optimizer_kwargs}")
+                logger.print(f"use D-Adaptation Adam optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptAdan".lower():
                 optimizer_class = dadaptation.DAdaptAdan
-                print(f"use D-Adaptation Adan optimizer | {optimizer_kwargs}")
+                logger.print(f"use D-Adaptation Adan optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptAdanIP".lower():
                 optimizer_class = experimental.DAdaptAdanIP
-                print(f"use D-Adaptation AdanIP optimizer | {optimizer_kwargs}")
+                logger.print(f"use D-Adaptation AdanIP optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptLion".lower():
                 optimizer_class = dadaptation.DAdaptLion
-                print(f"use D-Adaptation Lion optimizer | {optimizer_kwargs}")
+                logger.print(f"use D-Adaptation Lion optimizer | {optimizer_kwargs}")
             elif optimizer_type == "DAdaptSGD".lower():
                 optimizer_class = dadaptation.DAdaptSGD
-                print(f"use D-Adaptation SGD optimizer | {optimizer_kwargs}")
+                logger.print(f"use D-Adaptation SGD optimizer | {optimizer_kwargs}")
             else:
                 raise ValueError(f"Unknown optimizer type: {optimizer_type}")
 
@@ -491,26 +470,27 @@ def get_optimizer(args, trainable_params):
             except ImportError:
                 raise ImportError("No Prodigy / Prodigy がインストールされていないようです")
 
-            print(f"use Prodigy optimizer | {optimizer_kwargs}")
+            logger.print(f"use Prodigy optimizer | {optimizer_kwargs}")
             optimizer_class = prodigyopt.Prodigy
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     elif optimizer_type == "Adafactor".lower():
-        # 引数を確認して適宜補正する
         if "relative_step" not in optimizer_kwargs:
-            optimizer_kwargs["relative_step"] = True  # default
-        if not optimizer_kwargs["relative_step"] and optimizer_kwargs.get("warmup_init", False):
-            print(f"set relative_step to True because warmup_init is True / warmup_initがTrueのためrelative_stepをTrueにします")
             optimizer_kwargs["relative_step"] = True
-        print(f"use Adafactor optimizer | {optimizer_kwargs}")
+        if "warmup_init" not in optimizer_kwargs:
+            optimizer_kwargs["warmup_init"] = False
+        if not optimizer_kwargs["relative_step"] and optimizer_kwargs["warmup_init"]:
+            logger.print(f"set relative_step to True because warmup_init is True")
+            optimizer_kwargs["relative_step"] = True
+        logger.print(f"use Adafactor optimizer")
+        logger.print(' | '.join([f"{k}={v}" for k, v in optimizer_kwargs.items()]))
 
         if optimizer_kwargs["relative_step"]:
-            print(f"relative_step is true / relative_stepがtrueです")
+            logger.print(f"relative_step is true")
             if lr != 0.0:
-                print(f"learning rate is used as initial_lr / 指定したlearning rateはinitial_lrとして使用されます")
-            args.learning_rate = None
+                logger.print(f"learning rate is used as initial_lr")
+            config.learning_rate = None
 
-            # trainable_paramsがgroupだった時の処理：lrを削除する
             if type(trainable_params) == list and type(trainable_params[0]) == dict:
                 has_group_lr = False
                 for group in trainable_params:
@@ -518,38 +498,37 @@ def get_optimizer(args, trainable_params):
                     has_group_lr = has_group_lr or (p is not None)
 
                 if has_group_lr:
-                    # 一応argsを無効にしておく TODO 依存関係が逆転してるのであまり望ましくない
-                    print(f"unet_lr and text_encoder_lr are ignored / unet_lrとtext_encoder_lrは無視されます")
-                    args.unet_lr = None
-                    args.text_encoder_lr = None
+                    logger.print(f"unet_lr and text_encoder_lr are ignored")
+                    config.unet_lr = None
+                    config.text_encoder_lr = None
 
-            if args.lr_scheduler != "adafactor":
-                print(f"use adafactor_scheduler / スケジューラにadafactor_schedulerを使用します")
-            args.lr_scheduler = f"adafactor:{lr}"  # ちょっと微妙だけど
+            if config.lr_scheduler != "adafactor":
+                logger.print(f"use adafactor_scheduler")
+            config.lr_scheduler = f"adafactor:{lr}"  # ちょっと微妙だけど
 
             lr = None
         else:
-            if args.max_grad_norm != 0.0:
-                print(
-                    f"because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0 / max_grad_normが設定されているためclip_grad_normが有効になります。0に設定して無効にしたほうがいいかもしれません"
+            if config.max_grad_norm != 0.0:
+                logger.print(
+                    f"because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0"
                 )
-            if args.lr_scheduler != "constant_with_warmup":
-                print(f"constant_with_warmup will be good / スケジューラはconstant_with_warmupが良いかもしれません")
+            if config.lr_scheduler != "constant_with_warmup":
+                logger.print(f"constant_with_warmup will be good")
             if optimizer_kwargs.get("clip_threshold", 1.0) != 1.0:
-                print(f"clip_threshold=1.0 will be good / clip_thresholdは1.0が良いかもしれません")
+                logger.print(f"clip_threshold=1.0 will be good")
 
         optimizer_class = transformers.optimization.Adafactor
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     elif optimizer_type == "AdamW".lower():
-        print(f"use AdamW optimizer | {optimizer_kwargs}")
+        logger.print(f"use AdamW optimizer | {optimizer_kwargs}")
         optimizer_class = torch.optim.AdamW
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
     if optimizer is None:
         # 任意のoptimizerを使う
-        optimizer_type = args.optimizer_type  # lowerでないやつ（微妙）
-        print(f"use {optimizer_type} | {optimizer_kwargs}")
+        optimizer_type = config.optimizer_type  # lowerでないやつ（微妙）
+        logger.print(f"use {optimizer_type} | {optimizer_kwargs}")
         if "." not in optimizer_type:
             optimizer_module = torch.optim
         else:
@@ -566,21 +545,16 @@ def get_optimizer(args, trainable_params):
     return optimizer_name, optimizer_args, optimizer
 
 
-def get_scheduler_fix(args, optimizer: Optimizer, num_train_steps):
+def get_scheduler_fix(config, optimizer: Optimizer, num_train_steps):
     """
     Unified API to get any scheduler from its name.
     """
-    name = args.lr_scheduler
-    num_warmup_steps: Optional[int] = args.lr_warmup_steps
-    num_cycles = args.lr_scheduler_num_cycles
-    power = args.lr_scheduler_power
+    name = config.lr_scheduler
+    num_warmup_steps: Optional[int] = config.lr_warmup_steps
+    num_cycles = config.lr_scheduler_num_cycles
+    power = config.lr_scheduler_power
 
-    lr_scheduler_kwargs = {}  # get custom lr_scheduler kwargs
-    if args.lr_scheduler_args is not None and len(args.lr_scheduler_args) > 0:
-        for arg in args.lr_scheduler_args:
-            key, value = arg.split("=")
-            value = ast.literal_eval(value)
-            lr_scheduler_kwargs[key] = value
+    lr_scheduler_kwargs = config.lr_scheduler_kwargs
 
     def wrap_check_needless_num_warmup_steps(return_vals):
         if num_warmup_steps is not None and num_warmup_steps != 0:
@@ -592,7 +566,7 @@ def get_scheduler_fix(args, optimizer: Optimizer, num_train_steps):
             type(optimizer) == transformers.optimization.Adafactor
         ), f"adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
         initial_lr = float(name.split(":")[1])
-        # print("adafactor scheduler init lr", initial_lr)
+        # LOGGER.print("adafactor scheduler init lr", initial_lr)
         return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
 
     name = SchedulerType(name)
@@ -650,7 +624,7 @@ def prepare_scheduler_for_custom_training(noise_scheduler, device):
     sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
     alpha = sqrt_alphas_cumprod
     sigma = sqrt_one_minus_alphas_cumprod
-    all_snr = (alpha / sigma) ** 2 # = alpha^2 / (1 - alpha^2)
+    all_snr = (alpha / sigma) ** 2  # = alpha^2 / (1 - alpha^2)
 
     noise_scheduler.all_snr = all_snr.to(device)
 
@@ -800,28 +774,39 @@ def get_size_embeddings(orig_size, crop_size, target_size, device):
     return vector
 
 
-def get_noise_noisy_latents_and_timesteps(args, noise_scheduler, latents):
+def get_noise_noisy_latents_and_timesteps(config, noise_scheduler, latents):
     # Sample noise that we'll add to the latents
     noise = torch.randn_like(latents, device=latents.device)
-    if args.noise_offset:
-        noise = advanced_train_utils.apply_noise_offset(latents, noise, args.noise_offset, args.adaptive_noise_scale)
-    if args.multires_noise_iterations:
+    if config.noise_offset:
+        noise = advanced_train_utils.apply_noise_offset(latents, noise, config.noise_offset, config.adaptive_noise_scale)
+    if config.multires_noise_iterations:
         noise = advanced_train_utils.pyramid_noise_like(
-            noise, latents.device, args.multires_noise_iterations, args.multires_noise_discount
+            noise, latents.device, config.multires_noise_iterations, config.multires_noise_discount
         )
 
     # Sample a random timestep for each image
     b_size = latents.shape[0]
-    min_timestep = 0 if args.min_timestep is None else args.min_timestep
-    max_timestep = noise_scheduler.config.num_train_timesteps if args.max_timestep is None else args.max_timestep
+    min_timestep = 0 if config.min_timestep is None else config.min_timestep
+    max_timestep = noise_scheduler.config.num_train_timesteps if config.max_timestep is None else config.max_timestep
 
-    timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device=latents.device)
-    timesteps = timesteps.long()
+    if config.timestep_sampler_type == "uniform":
+        timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device=latents.device)
+        timesteps = timesteps.long()
+    elif config.timestep_sampler_type == "logit_normal":  # Rectified Flow from SD3 paper (partial implementation)
+        from .rectified_flow import logit_normal
+        timestep_sampler_kwargs = config.timestep_sampler_kwargs
+        m = timestep_sampler_kwargs.get('loc', 0) or timestep_sampler_kwargs.get('mean', 0) or timestep_sampler_kwargs.get('m', 0) or timestep_sampler_kwargs.get('mu', 0)
+        s = timestep_sampler_kwargs.get('scale', 1) or timestep_sampler_kwargs.get('std', 1) or timestep_sampler_kwargs.get('s', 1) or timestep_sampler_kwargs.get('sigma', 1)
+        timesteps = logit_normal(mu=m, sigma=s, shape=(b_size,), device=latents.device)  # sample from logistic normal distribution
+        timesteps = timesteps * (max_timestep - min_timestep) + min_timestep  # scale to [min_timestep, max_timestep]
+        timesteps = timesteps.long()
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
-    if args.ip_noise_gamma:
-        noisy_latents = noise_scheduler.add_noise(latents, noise + args.ip_noise_gamma * torch.randn_like(latents), timesteps)
+    if config.ip_noise_gamma:
+        noisy_latents = noise_scheduler.add_noise(latents, noise + config.ip_noise_gamma * torch.randn_like(latents), timesteps)
+    # elif args.timestep_sampler_type == "logit_normal":
+    #     noisy_latents = (1 - timesteps) * latents + timesteps * noise
     else:
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
@@ -837,8 +822,8 @@ def apply_weighted_noise(noise, mask, weight, normalize=True):
     return noise
 
 
-def save_sd_model(
-    args,
+def save_sdxl_model_during_train(
+    config,
     save_dtype: torch.dtype,
     epoch: int,
     global_step: int,
@@ -849,7 +834,7 @@ def save_sd_model(
     logit_scale,
     ckpt_info,
 ):
-    ckpt_file = os.path.join(args.output_dir, f"{args.output_name}-ep{epoch}-step{global_step}.safetensors")
+    ckpt_file = os.path.join(config.output_dir, 'models', f"model_ep{epoch}_step{global_step}.safetensors")
     sdxl_model_utils.save_stable_diffusion_checkpoint(
         ckpt_file,
         text_encoder1,
@@ -876,7 +861,7 @@ class LossRecorder:
         self.losses.append(loss)
         self.t += 1
         ema = self.ema * self.gamma + loss * (1 - self.gamma)
-        ema_hat = ema / (1 - self.gamma ** self.t)
+        ema_hat = ema / (1 - self.gamma ** self.t) if self.t < 500 else ema
         self.ema = ema_hat
 
     def moving_average(self, *, window: int) -> float:

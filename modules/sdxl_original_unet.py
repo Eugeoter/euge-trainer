@@ -1,3 +1,28 @@
+# Diffusersのコードをベースとした sd_xl_baseのU-Net
+# state dictの形式をSDXLに合わせてある
+
+"""
+      target: sgm.modules.diffusionmodules.openaimodel.UNetModel
+      params:
+        adm_in_channels: 2816
+        num_classes: sequential
+        use_checkpoint: True
+        in_channels: 4
+        out_channels: 4
+        model_channels: 320
+        attention_resolutions: [4, 2]
+        num_res_blocks: 2
+        channel_mult: [1, 2, 4]
+        num_head_channels: 64
+        use_spatial_transformer: True
+        use_linear_in_transformer: True
+        transformer_depth: [1, 2, 10]  # note: the first is unused (due to attn_res starting at 2) 32, 16, 8 --> 64, 32, 16
+        context_dim: 2048
+        spatial_transformer_attn_type: softmax-xformers
+        legacy: False
+"""
+
+import logging
 import math
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -6,7 +31,11 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import functional as F
 from einops import rearrange
+# from .utils import setup_logging
 
+# setup_logging()
+
+# logger = logging.getLogger(__name__)
 
 IN_CHANNELS: int = 4
 OUT_CHANNELS: int = 4
@@ -308,7 +337,7 @@ class ResnetBlock2D(nn.Module):
 
     def forward(self, x, emb):
         if self.training and self.gradient_checkpointing:
-            # print("ResnetBlock2D: gradient_checkpointing")
+            # logger.info("ResnetBlock2D: gradient_checkpointing")
 
             def create_custom_forward(func):
                 def custom_forward(*inputs):
@@ -342,7 +371,7 @@ class Downsample2D(nn.Module):
 
     def forward(self, hidden_states):
         if self.training and self.gradient_checkpointing:
-            # print("Downsample2D: gradient_checkpointing")
+            # logger.info("Downsample2D: gradient_checkpointing")
 
             def create_custom_forward(func):
                 def custom_forward(*inputs):
@@ -629,7 +658,7 @@ class BasicTransformerBlock(nn.Module):
 
     def forward(self, hidden_states, context=None, timestep=None):
         if self.training and self.gradient_checkpointing:
-            # print("BasicTransformerBlock: checkpointing")
+            # logger.info("BasicTransformerBlock: checkpointing")
 
             def create_custom_forward(func):
                 def custom_forward(*inputs):
@@ -772,7 +801,7 @@ class Upsample2D(nn.Module):
 
     def forward(self, hidden_states, output_size=None):
         if self.training and self.gradient_checkpointing:
-            # print("Upsample2D: gradient_checkpointing")
+            # logger.info("Upsample2D: gradient_checkpointing")
 
             def create_custom_forward(func):
                 def custom_forward(*inputs):
@@ -1022,7 +1051,7 @@ class SdxlUNet2DConditionModel(nn.Module):
         for block in blocks:
             for module in block:
                 if hasattr(module, "set_use_memory_efficient_attention"):
-                    # print(module.__class__.__name__)
+                    # logger.info(module.__class__.__name__)
                     module.set_use_memory_efficient_attention(xformers, mem_eff)
 
     def set_use_sdpa(self, sdpa: bool) -> None:
@@ -1037,7 +1066,7 @@ class SdxlUNet2DConditionModel(nn.Module):
         for block in blocks:
             for module in block.modules():
                 if hasattr(module, "gradient_checkpointing"):
-                    # print(module.__class__.__name__, module.gradient_checkpointing, "->", value)
+                    # logger.info(f{module.__class__.__name__} {module.gradient_checkpointing} -> {value}")
                     module.gradient_checkpointing = value
 
     # endregion
@@ -1047,7 +1076,7 @@ class SdxlUNet2DConditionModel(nn.Module):
         timesteps = timesteps.expand(x.shape[0])
 
         hs = []
-        t_emb = get_timestep_embedding(timesteps, self.model_channels)  # , repeat_only=False)
+        t_emb = get_timestep_embedding(timesteps, self.model_channels, downscale_freq_shift=0)  # , repeat_only=False)
         t_emb = t_emb.to(x.dtype)
         emb = self.time_embed(t_emb)
 
@@ -1055,6 +1084,96 @@ class SdxlUNet2DConditionModel(nn.Module):
         assert x.dtype == y.dtype, f"dtype mismatch: {x.dtype} != {y.dtype}"
         # assert x.dtype == self.dtype
         emb = emb + self.label_emb(y)
+
+        def call_module(module, h, emb, context):
+            x = h
+            for layer in module:
+                # logger.info(layer.__class__.__name__, x.dtype, emb.dtype, context.dtype if context is not None else None)
+                if isinstance(layer, ResnetBlock2D):
+                    x = layer(x, emb)
+                elif isinstance(layer, Transformer2DModel):
+                    x = layer(x, context)
+                else:
+                    x = layer(x)
+            return x
+
+        # h = x.type(self.dtype)
+        h = x
+
+        for module in self.input_blocks:
+            h = call_module(module, h, emb, context)
+            hs.append(h)
+
+        h = call_module(self.middle_block, h, emb, context)
+
+        for module in self.output_blocks:
+            h = torch.cat([h, hs.pop()], dim=1)
+            h = call_module(module, h, emb, context)
+
+        h = h.type(x.dtype)
+        h = call_module(self.out, h, emb, context)
+
+        return h
+
+
+class InferSdxlUNet2DConditionModel:
+    def __init__(self, original_unet: SdxlUNet2DConditionModel, **kwargs):
+        self.delegate = original_unet
+
+        # override original model's forward method: because forward is not called by `__call__`
+        # overriding `__call__` is not enough, because nn.Module.forward has a special handling
+        self.delegate.forward = self.forward
+
+        # Deep Shrink
+        self.ds_depth_1 = None
+        self.ds_depth_2 = None
+        self.ds_timesteps_1 = None
+        self.ds_timesteps_2 = None
+        self.ds_ratio = None
+
+    # call original model's methods
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    def __call__(self, *args, **kwargs):
+        return self.delegate(*args, **kwargs)
+
+    def set_deep_shrink(self, ds_depth_1, ds_timesteps_1=650, ds_depth_2=None, ds_timesteps_2=None, ds_ratio=0.5):
+        if ds_depth_1 is None:
+            # logger.info("Deep Shrink is disabled.")
+            self.ds_depth_1 = None
+            self.ds_timesteps_1 = None
+            self.ds_depth_2 = None
+            self.ds_timesteps_2 = None
+            self.ds_ratio = None
+        else:
+            # logger.info(
+            #     f"Deep Shrink is enabled: [depth={ds_depth_1}/{ds_depth_2}, timesteps={ds_timesteps_1}/{ds_timesteps_2}, ratio={ds_ratio}]"
+            # )
+            self.ds_depth_1 = ds_depth_1
+            self.ds_timesteps_1 = ds_timesteps_1
+            self.ds_depth_2 = ds_depth_2 if ds_depth_2 is not None else -1
+            self.ds_timesteps_2 = ds_timesteps_2 if ds_timesteps_2 is not None else 1000
+            self.ds_ratio = ds_ratio
+
+    def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
+        r"""
+        current implementation is a copy of `SdxlUNet2DConditionModel.forward()` with Deep Shrink.
+        """
+        _self = self.delegate
+
+        # broadcast timesteps to batch dimension
+        timesteps = timesteps.expand(x.shape[0])
+
+        hs = []
+        t_emb = get_timestep_embedding(timesteps, _self.model_channels, downscale_freq_shift=0)  # , repeat_only=False)
+        t_emb = t_emb.to(x.dtype)
+        emb = _self.time_embed(t_emb)
+
+        assert x.shape[0] == y.shape[0], f"batch size mismatch: {x.shape[0]} != {y.shape[0]}"
+        assert x.dtype == y.dtype, f"dtype mismatch: {x.dtype} != {y.dtype}"
+        # assert x.dtype == _self.dtype
+        emb = emb + _self.label_emb(y)
 
         def call_module(module, h, emb, context):
             x = h
@@ -1071,20 +1190,97 @@ class SdxlUNet2DConditionModel(nn.Module):
         # h = x.type(self.dtype)
         h = x
 
-        for module in self.input_blocks:
+        for depth, module in enumerate(_self.input_blocks):
+            # Deep Shrink
+            if self.ds_depth_1 is not None:
+                if (depth == self.ds_depth_1 and timesteps[0] >= self.ds_timesteps_1) or (
+                    self.ds_depth_2 is not None
+                    and depth == self.ds_depth_2
+                    and timesteps[0] < self.ds_timesteps_1
+                    and timesteps[0] >= self.ds_timesteps_2
+                ):
+                    # print("downsample", h.shape, self.ds_ratio)
+                    org_dtype = h.dtype
+                    if org_dtype == torch.bfloat16:
+                        h = h.to(torch.float32)
+                    h = F.interpolate(h, scale_factor=self.ds_ratio, mode="bicubic", align_corners=False).to(org_dtype)
+
             h = call_module(module, h, emb, context)
             hs.append(h)
 
-        down_block_res_sample = h
+        h = call_module(_self.middle_block, h, emb, context)
 
-        h = call_module(self.middle_block, h, emb, context)  # middle block resnet sample
-        mid_block_res_sample = h
+        for module in _self.output_blocks:
+            # Deep Shrink
+            if self.ds_depth_1 is not None:
+                if hs[-1].shape[-2:] != h.shape[-2:]:
+                    # print("upsample", h.shape, hs[-1].shape)
+                    h = resize_like(h, hs[-1])
 
-        for module in self.output_blocks:
             h = torch.cat([h, hs.pop()], dim=1)
             h = call_module(module, h, emb, context)
 
-        h = h.type(x.dtype)
-        h = call_module(self.out, h, emb, context)
+        # Deep Shrink: in case of depth 0
+        if self.ds_depth_1 == 0 and h.shape[-2:] != x.shape[-2:]:
+            # print("upsample", h.shape, x.shape)
+            h = resize_like(h, x)
 
-        return h, down_block_res_sample, mid_block_res_sample
+        h = h.type(x.dtype)
+        h = call_module(_self.out, h, emb, context)
+
+        return h
+
+
+if __name__ == "__main__":
+    import time
+
+    # logger.info("create unet")
+    unet = SdxlUNet2DConditionModel()
+
+    unet.to("cuda")
+    unet.set_use_memory_efficient_attention(True, False)
+    unet.set_gradient_checkpointing(True)
+    unet.train()
+
+    # 使用メモリ量確認用の疑似学習ループ
+    # logger.info("preparing optimizer")
+
+    # optimizer = torch.optim.SGD(unet.parameters(), lr=1e-3, nesterov=True, momentum=0.9) # not working
+
+    # import bitsandbytes
+    # optimizer = bitsandbytes.adam.Adam8bit(unet.parameters(), lr=1e-3)        # not working
+    # optimizer = bitsandbytes.optim.RMSprop8bit(unet.parameters(), lr=1e-3)  # working at 23.5 GB with torch2
+    # optimizer=bitsandbytes.optim.Adagrad8bit(unet.parameters(), lr=1e-3)  # working at 23.5 GB with torch2
+
+    import transformers
+
+    optimizer = transformers.optimization.Adafactor(unet.parameters(), relative_step=True)  # working at 22.2GB with torch2
+
+    scaler = torch.cuda.amp.GradScaler(enabled=True)
+
+    # logger.info("start training")
+    steps = 10
+    batch_size = 1
+
+    for step in range(steps):
+        # logger.info(f"step {step}")
+        if step == 1:
+            time_start = time.perf_counter()
+
+        x = torch.randn(batch_size, 4, 128, 128).cuda()  # 1024x1024
+        t = torch.randint(low=0, high=10, size=(batch_size,), device="cuda")
+        ctx = torch.randn(batch_size, 77, 2048).cuda()
+        y = torch.randn(batch_size, ADM_IN_CHANNELS).cuda()
+
+        with torch.cuda.amp.autocast(enabled=True):
+            output = unet(x, t, ctx, y)
+            target = torch.randn_like(output)
+            loss = torch.nn.functional.mse_loss(output, target)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
+
+    time_end = time.perf_counter()
+    # logger.info(f"elapsed time: {time_end - time_start} [sec] for last {steps - 1} steps")

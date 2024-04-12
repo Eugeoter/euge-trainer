@@ -165,6 +165,8 @@ datasets/
 models/
 output/
 tokenizers/
-*_test.py
-draft*.py
+draft*
 wandb/
+*_dev*.py
+*_deprecated*.py
+*_test*.py

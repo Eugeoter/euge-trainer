@@ -6,8 +6,7 @@ from safetensors.torch import load_file, save_file
 from transformers import CLIPTextModel, CLIPTextConfig, CLIPTextModelWithProjection, CLIPTokenizer
 from typing import List
 from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
-from . import model_utils
-from . import sdxl_original_unet
+from . import model_utils, sdxl_original_unet, log_utils
 
 VAE_SCALE_FACTOR = 0.13025
 MODEL_VERSION_SDXL_BASE_V1_0 = "sdxl_base_v1-0"
@@ -70,6 +69,8 @@ VAE_PARAMS_OUT_CH = 3
 VAE_PARAMS_CH = 128
 VAE_PARAMS_CH_MULT = [1, 2, 4, 4]
 VAE_PARAMS_NUM_RES_BLOCKS = 2
+
+logger = log_utils.get_logger("model")
 
 
 def convert_sdxl_text_encoder_2_checkpoint(checkpoint, max_length):
@@ -192,20 +193,20 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dty
         checkpoint = None
 
     # U-Net
-    print("building U-Net")
+    logger.print("building U-Net")
     with init_empty_weights():
         unet = sdxl_original_unet.SdxlUNet2DConditionModel()
 
-    print("loading U-Net from checkpoint")
+    logger.print("loading U-Net from checkpoint")
     unet_sd = {}
     for k in list(state_dict.keys()):
         if k.startswith("model.diffusion_model."):
             unet_sd[k.replace("model.diffusion_model.", "")] = state_dict.pop(k)
     info = _load_state_dict_on_device(unet, unet_sd, device=map_location, dtype=dtype)
-    print("U-Net: ", info)
+    logger.print("U-Net: ", info)
 
     # Text Encoders
-    print("building text encoders")
+    logger.print("building text encoders")
 
     # Text Encoder 1 is same to Stability AI's SDXL
     text_model1_cfg = CLIPTextConfig(
@@ -258,7 +259,7 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dty
     with init_empty_weights():
         text_model2 = CLIPTextModelWithProjection(text_model2_cfg)
 
-    print("loading text encoders from checkpoint")
+    logger.print("loading text encoders from checkpoint")
     te1_sd = {}
     te2_sd = {}
     for k in list(state_dict.keys()):
@@ -272,22 +273,22 @@ def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dty
         te1_sd["text_model.embeddings.position_ids"] = torch.arange(77).unsqueeze(0)
 
     info1 = _load_state_dict_on_device(text_model1, te1_sd, device=map_location)  # remain fp32
-    print("text encoder 1:", info1)
+    logger.print("text encoder 1:", info1)
 
     converted_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(te2_sd, max_length=77)
     info2 = _load_state_dict_on_device(text_model2, converted_sd, device=map_location)  # remain fp32
-    print("text encoder 2:", info2)
+    logger.print("text encoder 2:", info2)
 
     # prepare vae
-    print("building VAE")
+    logger.print("building VAE")
     vae_config = model_utils.create_vae_diffusers_config()
     with init_empty_weights():
         vae = AutoencoderKL(**vae_config)
 
-    print("loading VAE from checkpoint")
+    logger.print("loading VAE from checkpoint")
     converted_vae_checkpoint = model_utils.convert_ldm_vae_checkpoint(state_dict, vae_config)
     info = _load_state_dict_on_device(vae, converted_vae_checkpoint, device=map_location, dtype=dtype)
-    print("VAE:", info)
+    logger.print("VAE:", info)
 
     ckpt_info = (epoch, global_step) if epoch is not None else None
     return text_model1, text_model2, vae, unet, logit_scale, ckpt_info

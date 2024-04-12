@@ -18,7 +18,7 @@ from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput, 
 from diffusers.utils import logging
 from PIL import Image
 
-from . import sdxl_model_utils, sdxl_train_utils
+from . import sdxl_model_utils, sdxl_train_utils, log_utils
 
 
 try:
@@ -42,7 +42,7 @@ except ImportError:
         }
 # ------------------------------------------------------------------------------
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+logger = log_utils.get_logger("eval")
 
 re_attention = re.compile(
     r"""
@@ -181,7 +181,7 @@ def get_prompts_with_weights(pipe: StableDiffusionPipeline, prompt: List[str], m
         tokens.append(text_token)
         weights.append(text_weight)
     if truncated:
-        logger.warning("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples")
+        logger.print(log_utils.yellow("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples"))
     return tokens, weights
 
 
@@ -555,7 +555,7 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
         self.requires_safety_checker = requires_safety_checker
         self.vae = vae
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
-        self.progress_bar = lambda x: tqdm(x, leave=False)
+        self.progress_bar = lambda x: logger.tqdm(x, leave=False, desc='inference')
 
         self.clip_skip = clip_skip
         self.tokenizers = tokenizer
@@ -782,6 +782,9 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
         mask_image: Union[torch.FloatTensor, PIL.Image.Image] = None,
         height: int = 512,
         width: int = 512,
+        original_width: Optional[int] = None,
+        original_height: Optional[int] = None,
+        original_scale_factor: Optional[int] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
         strength: float = 0.8,
@@ -966,9 +969,14 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # create size embs and concat embeddings for SDXL
-        orig_size = torch.tensor([height, width]).repeat(batch_size * num_images_per_prompt, 1).to(dtype)
+        target_size = torch.tensor([height, width]).repeat(batch_size * num_images_per_prompt, 1).to(dtype)
+        if original_width and original_height:
+            orig_size = torch.tensor([original_height, original_width]).repeat(batch_size * num_images_per_prompt, 1).to(dtype)  # multiply by 2
+        elif original_scale_factor:
+            orig_size = torch.tensor([height*original_scale_factor, width*original_scale_factor]).repeat(batch_size * num_images_per_prompt, 1).to(dtype)
+        else:
+            orig_size = target_size
         crop_size = torch.zeros_like(orig_size)
-        target_size = orig_size
         embs = sdxl_train_utils.get_size_embeddings(orig_size, crop_size, target_size, device).to(dtype)
 
         # make conditionings
@@ -1005,7 +1013,7 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
                 unet_additional_args["mid_block_additional_residual"] = mid_block_res_sample
 
             # predict the noise residual
-            noise_pred, _, _ = self.unet(latent_model_input, t, text_embedding, vector_embedding)
+            noise_pred = self.unet(latent_model_input, t, text_embedding, vector_embedding)
             noise_pred = noise_pred.to(dtype)  # U-Net changes dtype in LoRA training
 
             # perform guidance

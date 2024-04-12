@@ -1,12 +1,12 @@
-一个魔改 kohya-ss/sd-scripts 的 SDXL 微调的项目，原项目地址：https://github.com/kohya-ss/sd-scripts
+# SDXL Trainer
 
-## 特性
+一个魔改 [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts) 的 SDXL 微调的项目。
 
-### 1. 优化
+# 特性
 
 在 kohya-ss 的基础上，对训练脚本进行了优化，主要包括：
 
-1. 重写了数据集类：
+1. **重写了数据集类**：
    a. 实现了数据库读取，从 json 文件中读取需要的所有参数；
    b. 实现了多 GPU 并行缓存潜变量；
    c. 实现了异步潜变量缓存写入，通过异步 IO 来提高缓存潜变量时的 GPU 利用率，从而加速缓存；
@@ -14,45 +14,56 @@
    e. 支持多线程数据加载；
    f. 支持仅使用缓存文件，而不需要图像文件的训练；
    g. 支持非一次性的缓存读取，而是仅在开始时检查缓存的有效性，随训练逐步读取，降低了从运行脚本到开始训练的等待时间；
-2. 调整了标注处理算法；
-3. 实现了自动重复次数计算：自动根据不同数据的特征确定其在一个 epoch 内的重复次数；
-4. 支持单独缓存潜变量：仅加载 VAE 来缓存潜变量，而非在训练开始时加载所有组件后再缓存。
-5. 优化了控制台日志：
-   a. 在训练进度条中添加了更多的训练信息，如学习率、当前 loss、平均 loss、到下一个 epoch 需要的步数等；
-   b. 在多 GPU 训练时避免重复打印冗余信息；
-   c. 训练前打印了更多训练参数；
-6. 新增了模型保护机制：在训练出错/人为打断训练时自动保存模型文件，防止训练进度丢失。
+2. **支持单独缓存潜变量**：仅加载 VAE 来缓存潜变量，而非在训练开始时加载所有组件后再缓存。
+3. **更美观的控制台日志**
+4. **更安全的模型保护机制**：在训练出错/人为打断训练时自动保存模型文件，防止训练进度丢失。
+5. **更灵活的配置文件**：使用配置文件来配置训练参数，支持多种自定义参数。
+6. **更自由的训练策略定制**：提供训练策略自定义方式，支持自定义训练策略，包括自定义每个数据的重复次数、自定义标注处理方式等。
 
-### 2. 不支持的功能
+# 使用方法
 
-1. 不支持 `{图像文件名}.txt` 的标注文件，而直接使用元数据 json 文件；
+## 安装
 
-## 使用方法
+```bash
+git clone https://github.com/Eugeoter/sdxl-trainer.git
+cd sdxl-trainer
+pip install -r requirements.txt
+```
 
-### 1. 安装
+## 训练
 
-1. `git clone https://github.com/Eugeoter/sdxl-trainer`
+### 准备数据
 
-2. `cd sdxl-trainer`
+准备好图像（或潜变量缓存）文件和同名的标注文件（或整一个元数据 json 文件），将图像（或潜变量缓存）文件放置在同一文件夹 image_dir 内。
 
-3. `pip install -r requirements.txt`
+生成元数据文件可使用 [Waifuset](https://github.com/Eugeoter/waifuset) 项目 或 [kohya-ss](https://github.com/kohya-ss/sd-scripts)。是时候摆脱 txt 标注文件了。
 
-### 2. 训练
+训练器会加载配置中 `image_dirs` 和 `metadata_files` 所指向的数据。其中，`image_dirs` 是一个字符串列表，包含了所有的图像文件夹路径。`metadata_files` 是一个字符串列表，包含了所有的元数据文件路径。
 
-#### 2.1. 数据
+数据加载方式有两种，一种是加载图像和与图像同名的 txt 文本文件作为标注，另一种是直接从元数据文件中加载标注。具体使用哪一种方式取决于 `metadata_files` 是否为空。
 
-准备好图像（或潜变量缓存）文件和元数据 json 文件，将图像（或潜变量缓存）文件放置在同一文件夹 image_dir 内。
+- 当 `metadata_files` 为空时，训练器会加载 `image_dirs` 中的所有图像文件，并读取与图像同名的 txt 文件作为标注。
+- 当 `metadata_files` 不为空时，训练器会从 `metadata_files` 中的元数据文件中读取每个数据的信息，包括了图像路径、标注、原始尺寸等等。该方式无需为每个图像文件创建一个 txt 文件作为标注，但需要额外的元数据文件。
+  当某个元数据中的图像路径不存在时，训练器会尝试从 `image_dirs` 中查找文件名（不包含路径）相同的图像文件。
 
-生成元数据文件可使用 kohya-ss 项目或 `https://github.com/Eugeoter?tab=repositories` 项目。是时候摆脱 txt 标注文件了。
+无论以哪种加载数据，请确保所加载的数据中没有去除后缀后重名的图像文件，否则会导致数据加载错误。
 
-#### 2.2. 参数
+您可以直接使用由缓存潜变量生成的 npz 缓存文件代替原始图像文件。
 
-可在 params.txt 内配置参数后，复制到控制台终端执行，具体参数含义见 modules/arg_utils.py
+### 配置参数
 
-#### 2.3. 多 GPU 训练
+在 [configs/train_config.py](configs/train_config.py) 内配置参数（或自行新建）后，执行 `accelerate launch sdxl_train.py --config configs/train_config.py` 即可开始训练。
 
-将原本参数中的 `accelerate launch sdxl_train.py` 更换为 `accelerate launch --num_processes=4 --multi_gpu --gpu_ids=0,1,2,3 sdxl_train.py` 即可进行多 GPU 训练，其中 `--num_processes` 为进程数，`--gpu_ids` 为 GPU 编号。
+其中，`--config` 参数为配置文件路径，`configs/train_config.py` 为默认配置文件，您需要根据自己的需求修改配置文件，或指定您自己修改的配置文件路径。
 
-#### 2.4. 缓存潜变量
+完整的参数介绍请参考 [docs/CONFIG.md](docs/CONFIG.md)。
 
-可使用相同参数执行 `accelerate launch cache_latents.py` 缓存潜变量，缓存后的潜变量文件将被储存为 `{图像文件名}.npz` 的格式。
+### 多 GPU 训练
+
+将原本参数中的 `accelerate launch sdxl_train.py --config configs/train_config.py` 更换为 `accelerate launch --num_processes=4 --multi_gpu --gpu_ids=0,1,2,3 sdxl_train.py --config configs/train_config.py` 即可进行多 GPU 训练，其中 `--num_processes` 为进程数，`--gpu_ids` 为 GPU 编号。
+
+### 缓存潜变量
+
+建议单独提前缓存潜变量，以加速训练。
+
+缓存潜变量通过单独的脚本 `cache_latents.py` 运行。您可使用与训练相同的配置文件执行 `accelerate launch cache_latents.py --config configs/train_config.py` 缓存潜变量，缓存后的潜变量文件将被储存为 `{图像文件名}.npz` 的格式。您也可以用类似的方式进行多 GPU 缓存。
