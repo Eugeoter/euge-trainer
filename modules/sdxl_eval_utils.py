@@ -177,7 +177,7 @@ def sample_during_train(
     )
     pipe.to(device)
 
-    sample_dir = os.path.join(config.output_dir, "samples", f"epoch_{epoch}" if epoch is not None else f"step_{steps}")
+    sample_dir = os.path.join(config.output_dir, config.output_subdir.samples, f"epoch_{epoch}" if epoch is not None else f"step_{steps}")
     os.makedirs(sample_dir, exist_ok=True)
 
     rng_state = torch.get_rng_state()

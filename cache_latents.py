@@ -12,7 +12,6 @@ def cache_latents(
     argv,
 ):
     config = flags.FLAGS.config
-    config.output_dir = log_utils.smart_path(os.path.dirname(config.output_dir), os.path.basename(config.output_dir))
     accelerator = accelerator = Accelerator(
         mixed_precision=config.mixed_precision,
         cpu=config.cpu,

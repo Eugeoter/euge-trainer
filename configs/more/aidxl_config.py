@@ -32,6 +32,11 @@ def get_config():
     config.persistent_data_loader_workers = False
 
     # OS Parameters
+    config.output_subdir = cfg(
+        models='models',
+        samples='samples',
+        logs='logs',
+    )
     config.loss_recorder_kwargs = cfg(
         gamma=0.9,
         stride=1000,

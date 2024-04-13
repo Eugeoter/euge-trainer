@@ -11,7 +11,6 @@ from modules.sdxl_lpw_stable_diffusion import SdxlStableDiffusionLongPromptWeigh
 @torch.no_grad()
 def eval(argv):
     config = flags.FLAGS.config
-    config.output_dir = log_utils.smart_path(os.path.dirname(config.output_dir), os.path.basename(config.output_dir))
     accelerator = sdxl_eval_utils.prepare_accelerator(config)
 
     is_main_process = accelerator.is_main_process

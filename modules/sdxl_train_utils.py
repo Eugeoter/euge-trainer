@@ -127,7 +127,7 @@ def collate_fn(batch):
 
 
 def prepare_accelerator(config):
-    log_dir = os.path.join(config.output_dir, 'logs')
+    log_dir = os.path.join(config.output_dir, config.output_subdir.logs)
     log_dir = log_dir + "/" + time.strftime("%Y%m%d%H%M%S", time.localtime())
     os.makedirs(log_dir, exist_ok=True)
 
@@ -834,7 +834,7 @@ def save_sdxl_model_during_train(
     logit_scale,
     ckpt_info,
 ):
-    ckpt_file = os.path.join(config.output_dir, 'models', f"model_ep{epoch}_step{global_step}.safetensors")
+    ckpt_file = os.path.join(config.output_dir, config.output_subdir.models, f"{os.path.basename(config.output_dir)}_ep{epoch}_step{global_step}.safetensors")
     sdxl_model_utils.save_stable_diffusion_checkpoint(
         ckpt_file,
         text_encoder1,
