@@ -36,8 +36,6 @@ pip install -r requirements.txt
 
 准备好图像（或潜变量缓存）文件和同名的标注文件（或整一个元数据 json 文件），将图像（或潜变量缓存）文件放置在同一文件夹 image_dir 内。
 
-生成元数据文件可使用 [Waifuset](https://github.com/Eugeoter/waifuset) 项目 或 [kohya-ss](https://github.com/kohya-ss/sd-scripts)。是时候摆脱 txt 标注文件了。
-
 训练器会加载配置中 `image_dirs` 和 `metadata_files` 所指向的数据。其中，`image_dirs` 是一个字符串列表，包含了所有的图像文件夹路径。`metadata_files` 是一个字符串列表，包含了所有的元数据文件路径。
 
 数据加载方式有两种，一种是加载图像和与图像同名的 txt 文本文件作为标注，另一种是直接从元数据文件中加载标注。具体使用哪一种方式取决于 `metadata_files` 是否为空。
@@ -49,6 +47,76 @@ pip install -r requirements.txt
 无论以哪种加载数据，请确保所加载的数据中没有去除后缀后重名的图像文件，否则会导致数据加载错误。
 
 您可以直接使用由缓存潜变量生成的 npz 缓存文件代替原始图像文件。
+
+以下几种数据组织方式均可：
+
+#### a. 图像 + 图像同名 txt 标注文件：
+
+```
+  image_dir
+  ├── image1.jpg
+  ├── image1.txt
+  ├── image2.jpg
+  ├── image2.txt
+  ├── ...
+```
+
+#### b. 缓存潜变量 + 潜变量同名 txt 标注文件：
+
+```
+  latent_dir
+  ├── image1.npz
+  ├── image1.txt
+  ├── image2.npz
+  ├── image2.txt
+  ├── ...
+```
+
+#### 元数据文件
+
+元数据文件是一个 json 文件，包含了一些数据的各种信息，如图像路径、标注、图像尺寸、美学评分等。训练时，可以用一个或多个元数据文件来描述数据集。
+
+使用元数据文件替代传统 txt 标注能简化数据集管理，不再需要为每个图像文件创建一个 txt 文件作为标注。其能够存储更多种类的数据信息。
+
+制作元数据文件可使用 [Waifuset](https://github.com/Eugeoter/waifuset) 项目 或 [kohya-ss](https://github.com/kohya-ss/sd-scripts)。是时候摆脱 txt 标注文件了。
+
+元数据 json 文件格式如下：
+
+```json
+{
+	"image1": {
+			"image_path": ".../image1.jpg", // 图像路径
+			"caption": "1girl, solo, ...", // 标注
+      ... // 其他元数据
+    },
+  "image2": {
+      "image_path": ".../image2.jpg",
+      "caption": "1girl, solo, ...",
+      ...
+    },
+  ...
+}
+```
+
+#### c. 图像 + 元数据 json 文件：
+
+```
+  image_dir
+  ├── image1.jpg
+  ├── image2.jpg
+  ├── ...
+  metadata.json
+```
+
+#### d. 缓存潜变量 + 元数据 json 文件：
+
+```
+  latent_dir
+  ├── image1.npz
+  ├── image2.npz
+  ├── ...
+  metadata.json
+```
 
 ### 配置参数
 
