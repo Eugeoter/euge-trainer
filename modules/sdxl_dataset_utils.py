@@ -459,7 +459,7 @@ class Dataset(torch.utils.data.Dataset):
 
         if self.num_processes > 1:
             batches = batches[self.process_idx::self.num_processes]  # split batches into processes
-            self.logger.print(f"process {self.process_idx+1}/{self.num_processes} | num_batches: {len(batches)}", disable=False)
+            self.logger.print(f"process {self.process_idx+1}/{self.num_processes} | num_uncached_batches: {len(batches)}", disable=False)
 
         self.logger.print(f"total: {len(batches)} x {vae_batch_size} x {self.num_processes} ≈ {total_num_batches*vae_batch_size} (difference is caused by bucketing)")
         self.logger.print(f"device: {log_utils.yellow(vae.device)} | dtype: {log_utils.yellow(vae.dtype)}")
@@ -1039,7 +1039,7 @@ def get_input_ids(caption, tokenizer, max_token_length):
 def fmt2dan(tag):
     if isinstance(tag, str):
         tag = tag.lower().strip()
-        tag = tag.replace(' ', '_').replace('\\(', '(').replace('\\)', ')').replace(': ', ':')
+        tag = tag.replace(': ', ':').replace(' ', '_').replace('\\(', '(').replace('\\)', ')')
         return tag
     elif isinstance(tag, list):
         return [fmt2dan(t) for t in tag]

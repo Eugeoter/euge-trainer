@@ -1,0 +1,30 @@
+[
+    {
+        "prompt": "solid black background, pure black",
+        "negative_prompt": "",
+        "steps": 28,
+        "width": 1024,
+        "height": 1024
+    },
+    {
+        "prompt": "solid white background, pure white",
+        "negative_prompt": "",
+        "steps": 28,
+        "width": 1024,
+        "height": 1024
+    },
+    {
+        "prompt": "1boy, extremely dark theme",
+        "negative_prompt": "",
+        "steps": 28,
+        "width": 1024,
+        "height": 1024
+    },
+    {
+        "prompt": "1boy, extremely light theme",
+        "negative_prompt": "",
+        "steps": 28,
+        "width": 1024,
+        "height": 1024
+    }
+]

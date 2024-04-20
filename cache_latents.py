@@ -17,6 +17,8 @@ def cache_latents(
         cpu=config.cpu,
     )
     logger = log_utils.get_logger("cache")
+    for lg in log_utils.get_all_loggers().values():
+        lg.disable = not accelerator.is_main_process
     device = torch.device("cuda" if torch.cuda.is_available() and not config.cpu else "cpu")
     latents_dtype = torch.float32
     if config.mixed_precision == "fp16":

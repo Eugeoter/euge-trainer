@@ -17,7 +17,6 @@ SCHEDLER_SCHEDULE = "scaled_linear"
 def prepare_accelerator(args):
     accelerator = Accelerator(
         mixed_precision=args.mixed_precision,
-        log_with='tensorboard',
         cpu=args.cpu,
     )
     return accelerator

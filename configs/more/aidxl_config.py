@@ -13,7 +13,7 @@ def get_config():
     config.pretrained_model_name_or_path = r'/path/to/your/model.safetensors'
     config.image_dirs = [r'/path/to/your/images']
     config.metadata_files = []
-    config.output_dir = 'train-1'
+    config.output_dir = 'train/aidxlv08'
 
     # Model Parameters
     config.vae = None
@@ -36,12 +36,14 @@ def get_config():
         models='models',
         samples='samples',
         logs='logs',
+        train_state='train_state',
     )
     config.loss_recorder_kwargs = cfg(
         gamma=0.9,
         stride=1000,
     )
     config.save_precision = 'fp16'
+    config.save_train_state = True
     config.save_every_n_epochs = 1
     config.save_every_n_steps = 1000
     config.save_on_train_end = True
@@ -89,8 +91,7 @@ def get_config():
     config.zero_terminal_snr = True
     config.ip_noise_gamma = 0.0
     config.min_snr_gamma = 5.0
-    config.scale_v_pred_loss_like_noise_pred = False
-    config.v_pred_like_loss = 0.0
+    config.prediction_type = 'epsilon'
     config.debiased_estimation_loss = False
     config.min_timestep = 0
     config.max_timestep = 1000
@@ -130,7 +131,7 @@ def get_config():
     # Cache Parameters
     config.cache_latents = True
     config.cache_latents_to_disk = True
-    config.check_cache_validity = True
+    config.check_cache_validity = False
     config.keep_cached_latents_in_memory = True
     config.async_cache = True
 

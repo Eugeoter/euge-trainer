@@ -475,7 +475,7 @@ def convert_text_encoder_2_state_dict_to_sdxl(checkpoint, logit_scale):
 
 
 def save_stable_diffusion_checkpoint(
-    output_file,
+    fp,
     text_encoder1,
     text_encoder2,
     unet,
@@ -486,7 +486,7 @@ def save_stable_diffusion_checkpoint(
     logit_scale,
     save_dtype=None,
 ):
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
     state_dict = {}
 
     def update_sd(prefix, sd):
@@ -521,12 +521,40 @@ def save_stable_diffusion_checkpoint(
     new_ckpt["epoch"] = epochs
     new_ckpt["global_step"] = steps
 
-    if model_utils.is_safetensors(output_file):
-        save_file(state_dict, output_file)
+    if model_utils.is_safetensors(fp):
+        save_file(state_dict, fp)
     else:
-        torch.save(new_ckpt, output_file)
+        torch.save(new_ckpt, fp)
 
     return key_count
+
+
+def save_train_state(
+    fp: str,
+    optimizer,
+    lr_scheduler,
+    epochs: int,
+    steps: int,
+):
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    state_dict = {
+        "optimizer": optimizer.state_dict(),
+        "lr_scheduler": lr_scheduler.state_dict(),
+        "epoch": epochs,
+        "step": steps,
+    }
+    torch.save(state_dict, fp)
+
+
+def load_train_state(
+    fp: str,
+    optimizer,
+    lr_scheduler,
+):
+    state_dict = torch.load(fp)
+    optimizer.load_state_dict(state_dict["optimizer"])
+    lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
+    return state_dict["epoch"], state_dict["step"]
 
 
 def save_diffusers_checkpoint(

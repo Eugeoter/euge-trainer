@@ -12,7 +12,8 @@ def get_config():
     config.pretrained_model_name_or_path = r'/path/to/your/model.safetensors'
     config.image_dirs = [r'/path/to/your/images']
     config.metadata_files = []
-    config.output_dir = 'train-1'
+    config.output_dir = 'train/example'
+    config.resume_from = None
 
     # Model Parameters
     config.vae = None
@@ -35,14 +36,17 @@ def get_config():
         models='models',
         samples='samples',
         logs='logs',
+        train_state='train_state',
     )
     config.loss_recorder_kwargs = cfg(
         gamma=0.9,
         stride=1000,
     )
     config.save_precision = 'fp16'
-    config.save_every_n_epochs = None
-    config.save_every_n_steps = None
+    config.save_model = True
+    config.save_train_state = True
+    config.save_every_n_epochs = 0
+    config.save_every_n_steps = 0
     config.save_on_train_end = True
     config.save_on_keyboard_interrupt = True
     config.save_on_exception = True
@@ -80,16 +84,15 @@ def get_config():
     config.diffusers_xformers = False
     config.sdpa = False
     config.clip_skip = 1
-    config.noise_offset = 0.0
+    config.noise_offset = 0.0357
     config.multires_noise_iterations = 0
     config.multires_noise_discount = 0.25
     config.adaptive_noise_scale = None
     config.max_grad_norm = 0.0
+    config.prediction_type = 'epsilon'
     config.zero_terminal_snr = False
     config.ip_noise_gamma = 0.0
     config.min_snr_gamma = 5.0
-    config.scale_v_pred_loss_like_noise_pred = False
-    config.v_pred_like_loss = 0.0
     config.debiased_estimation_loss = False
     config.min_timestep = 0
     config.max_timestep = 1000
@@ -98,8 +101,8 @@ def get_config():
 
     # Sample Parameters
     config.sample_benchmark = r'benchmarks/example_benchmark.json'
-    config.sample_every_n_epochs = None
-    config.sample_every_n_steps = None
+    config.sample_every_n_epochs = 0
+    config.sample_every_n_steps = 0
     config.sample_sampler = 'euler_a'
 
     config.sample_params = cfg(
@@ -126,7 +129,7 @@ def get_config():
     # Cache Parameters
     config.cache_latents = True
     config.cache_latents_to_disk = True
-    config.check_cache_validity = True
+    config.check_cache_validity = False
     config.keep_cached_latents_in_memory = True
     config.async_cache = True
 

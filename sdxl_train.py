@@ -10,8 +10,7 @@ from ml_collections import config_flags
 from torch.utils.data import DataLoader
 from diffusers import DDPMScheduler
 from tqdm import tqdm
-from modules import advanced_train_utils, sdxl_train_utils, sdxl_eval_utils, sdxl_dataset_utils, log_utils
-from modules.sdxl_lpw_stable_diffusion import SdxlStableDiffusionLongPromptWeightingPipeline
+from modules import advanced_train_utils, sdxl_train_utils, sdxl_dataset_utils, log_utils
 
 
 def train(argv):
@@ -86,8 +85,8 @@ def train(argv):
         if torch.__version__ >= "2.0.0":  # PyTorch 2.0.0 以上対応のxformersなら以下が使える
             vae.set_use_memory_efficient_attention_xformers(config.xformers)
 
-    training_models = []
-    params_to_optimize = []
+    if config.cache_latents:
+        vae.to('cpu')
 
     train_unet = config.learning_rate > 0
 
@@ -98,6 +97,9 @@ def train(argv):
         ), f"block_lr must have {sdxl_train_utils.UNET_NUM_BLOCKS_FOR_BLOCK_LR} values"
     else:
         block_lrs = None
+
+    training_models = []
+    params_to_optimize = []
 
     if train_unet:
         if config.gradient_checkpointing:
@@ -183,30 +185,49 @@ def train(argv):
     # calculate number of trainable parameters
     n_params = 0
     for params in params_to_optimize:
-        for p in params["params"]:
-            n_params += p.numel()
+        for param in params["params"]:
+            n_params += param.numel()
 
     if config.full_fp16:
         sdxl_train_utils.patch_accelerator_for_fp16_training(accelerator)
 
-    _, _, optimizer = sdxl_train_utils.get_optimizer(config, params_to_optimize)
-
+    optimizer = sdxl_train_utils.get_optimizer(config, params_to_optimize)
     lr_scheduler = sdxl_train_utils.get_scheduler_fix(config, optimizer, num_train_steps)
 
     optimizer, lr_scheduler, train_dataloader = accelerator.prepare(
         optimizer, lr_scheduler, train_dataloader
     )
 
+    train_state = sdxl_train_utils.TrainState(
+        config,
+        accelerator,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        train_dataloader=train_dataloader,
+        unet=unet,
+        text_encoder1=text_encoder1,
+        text_encoder2=text_encoder2,
+        tokenizer1=tokenizer1,
+        tokenizer2=tokenizer2,
+        vae=vae,
+        logit_scale=logit_scale,
+        ckpt_info=ckpt_info,
+        save_dtype=save_dtype,
+    )
+
     noise_scheduler = DDPMScheduler(
         beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000, clip_sample=False
     )
+
+    if config.prediction_type is not None:  # set prediction_type of scheduler if defined
+        noise_scheduler.register_to_config(prediction_type=config.prediction_type)
     sdxl_train_utils.prepare_scheduler_for_custom_training(noise_scheduler, accelerator.device)
     if config.zero_terminal_snr:
         advanced_train_utils.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
 
     if is_main_process:
         accelerator.init_trackers("finetuning", init_kwargs={})
-    loss_recorder = sdxl_train_utils.LossRecorder(gamma=config.loss_recorder_kwargs.gamma)
+    loss_recorder = sdxl_train_utils.LossRecorder(gamma=config.loss_recorder_kwargs.gamma, max_window=min(num_steps_per_epoch, 10000))  # 10000 is for memory efficiency
 
     logger.print(log_utils.green(f"==================== START TRAINING ===================="))
     logger.print(f"  num train steps: {log_utils.yellow(num_train_epochs)} x {log_utils.yellow(num_steps_per_epoch)} = {log_utils.yellow(num_train_steps)}")
@@ -220,28 +241,23 @@ def train(argv):
     logger.print(f"  optimizer: {config.optimizer_type} | timestep sampler: {config.timestep_sampler_type}")
     logger.print(f"  device: {log_utils.yellow(accelerator.device)}")
 
-    progress_bar = tqdm(total=num_train_steps, desc='steps', disable=not accelerator.is_local_main_process)
-    global_step = 0
-    # nan_cnt = 0
+    pbar = train_state.pbar()
 
     try:
-        for epoch in range(num_train_epochs):
+        while train_state.epoch < num_train_epochs:
             if is_main_process:
-                progress_bar.write(f"epoch: {epoch + 1}/{num_train_epochs}")
+                pbar.write(f"epoch: {train_state.epoch}/{num_train_epochs}")
             for m in training_models:
                 m.train()
             for step, batch in enumerate(train_dataloader):
                 with accelerator.accumulate(*training_models):
                     if batch.get("latents") is not None:
                         latents = batch["latents"].to(accelerator.device)
-                        # if latents.dtype != weight_dtype:
-                        #     latents = latents.to(weight_dtype)
                     else:
-                        # logger.print(f"missing latents in batch {batch['image_keys']}")
                         with torch.no_grad():
                             latents = vae.encode(batch["images"].to(vae_dtype)).latent_dist.sample().to(weight_dtype)
                             if torch.any(torch.isnan(latents)):
-                                progress_bar.write("NaN found in latents, replacing with zeros")
+                                pbar.write("NaN found in latents, replacing with zeros")
                                 latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
                     latents *= sdxl_train_utils.VAE_SCALE_FACTOR
 
@@ -281,19 +297,15 @@ def train(argv):
                     with accelerator.autocast():
                         noise_pred = unet(noisy_latents, timesteps, text_embedding, vector_embedding)
 
-                        # if guess_mode and do_classifier_free_guidance:
-                        #     # Infered ControlNet only for the conditional batch.
-                        #     # To apply the output of ControlNet to both the unconditional and conditional batches,
-                        #     # add 0 to the unconditional batch to keep it unchanged.
-                        #     down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
-                        #     mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
-
-                    target = noise
+                    if noise_scheduler.config.prediction_type == "epsilon":
+                        target = noise
+                    elif noise_scheduler.config.prediction_type == "v_prediction":
+                        target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                    else:
+                        raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                     if (
                         config.min_snr_gamma
-                        or config.scale_v_pred_loss_like_noise_pred
-                        or config.v_pred_like_loss
                         or config.debiased_estimation_loss
                     ):
                         # do not mean over batch dimension for snr weight or scale v-pred loss
@@ -301,11 +313,7 @@ def train(argv):
                         loss = loss.mean([1, 2, 3])
 
                         if config.min_snr_gamma:
-                            loss = advanced_train_utils.apply_snr_weight(loss, timesteps, noise_scheduler, config.min_snr_gamma)
-                        if config.scale_v_pred_loss_like_noise_pred:
-                            loss = advanced_train_utils.scale_v_prediction_loss_like_noise_prediction(loss, timesteps, noise_scheduler)
-                        if config.v_pred_like_loss:
-                            loss = advanced_train_utils.add_v_prediction_like_loss(loss, timesteps, noise_scheduler, config.v_pred_like_loss)
+                            loss = advanced_train_utils.apply_snr_weight(loss, timesteps, noise_scheduler, config.min_snr_gamma, config.prediction_type)
                         if config.debiased_estimation_loss:
                             loss = advanced_train_utils.apply_debiased_estimation(loss, timesteps, noise_scheduler)
 
@@ -314,8 +322,6 @@ def train(argv):
                         loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="mean")
 
                     if torch.isnan(loss):
-                        # progress_bar.write("NaN found in loss, replacing with zeros")
-                        # nan_cnt += 1
                         loss = torch.where(torch.isnan(loss), torch.zeros_like(loss), loss)
 
                     accelerator.backward(loss)
@@ -330,50 +336,10 @@ def train(argv):
                     optimizer.zero_grad(set_to_none=True)
 
                 if accelerator.sync_gradients:
-                    progress_bar.update(1)
-                    global_step += 1
-
-                    if config.sample_every_n_steps is not None and (global_step + 1) % config.sample_every_n_steps == 0:
-                        try:
-                            sdxl_eval_utils.sample_during_train(
-                                pipe_class=SdxlStableDiffusionLongPromptWeightingPipeline,
-                                accelerator=accelerator,
-                                config=config,
-                                epoch=None,
-                                steps=global_step + 1,
-                                unet=unet,
-                                text_encoder=[text_encoder1, text_encoder2],
-                                vae=vae,
-                                tokenizer=[tokenizer1, tokenizer2],
-                                device=accelerator.device,
-                            )
-
-                        except Exception as e:
-                            logger.print("exception when sample images:", e)
-                            traceback.print_exc()
-                            pass
-
-                    if config.save_every_n_steps is not None and (global_step + 1) % config.save_every_n_steps == 0:
-                        accelerator.wait_for_everyone()
-                        if is_main_process:
-                            progress_bar.write(f"saving model at step {global_step + 1}")
-                            p = sdxl_train_utils.save_sdxl_model_during_train(
-                                config,
-                                save_dtype,
-                                epoch + 1,
-                                global_step + 1,
-                                accelerator.unwrap_model(text_encoder1),
-                                accelerator.unwrap_model(text_encoder2),
-                                accelerator.unwrap_model(unet),
-                                vae,
-                                logit_scale,
-                                ckpt_info
-                            )
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                                gc.collect()
-                            progress_bar.write(f"model saved at `{p}`")
-                        accelerator.wait_for_everyone()
+                    pbar.update(1)
+                    train_state.step()
+                    train_state.save(on_epoch_end=False)
+                    train_state.sample(on_epoch_end=False)
 
                 # loggings
                 step_loss: float = loss.detach().item()
@@ -386,108 +352,43 @@ def train(argv):
                     sdxl_train_utils.append_lr_to_logs(logs, lr_scheduler, config.optimizer_type, including_unet=train_unet)
                 else:
                     sdxl_train_utils.append_block_lr_to_logs(block_lrs, logs, lr_scheduler, config.optimizer_type)  # U-Net is included in block_lrs
-                accelerator.log(logs, step=global_step)
+                accelerator.log(logs, step=train_state.global_step)
 
                 pbar_logs = {
                     'lr': lr_scheduler.get_last_lr()[0],
-                    'epoch': epoch + 1,
-                    'global_step': global_step + 1,
+                    'epoch': train_state.epoch,
+                    'global_step': train_state.global_step,
                     'next': len(train_dataloader) - step - 1,
                     'step_loss': step_loss,
                     'avr_loss': avr_loss,
                     'ema_loss': ema_loss,
-                    # 'nan': nan_cnt,
-                    # 'batch': batch['image_keys'][0],
                 }
-                progress_bar.set_postfix(pbar_logs)
-
-                # del batch, latents, orig_size, target_size, crop_size, input_ids1, input_ids2, encoder_hidden_states1, encoder_hidden_states2, pool2, embs, vector_embedding, text_embedding, noise, noisy_latents, timesteps, noise_pred, target, loss
+                pbar.set_postfix(pbar_logs)
 
             # end of epoch
-            logs = {
-                "loss/epoch": loss_recorder.moving_average(window=num_steps_per_epoch)
-            }
-            accelerator.log(logs, step=epoch + 1)
+            logs = {"loss/epoch": loss_recorder.moving_average(window=num_steps_per_epoch)}
+            accelerator.log(logs, step=train_state.epoch)
             accelerator.wait_for_everyone()
-
-            if config.save_every_n_epochs and (epoch + 1) % config.save_every_n_epochs == 0:
-                if is_main_process:
-                    progress_bar.write(f"saving model at epoch {epoch + 1}")
-                    p = sdxl_train_utils.save_sdxl_model_during_train(
-                        config,
-                        save_dtype,
-                        epoch + 1,
-                        global_step + 1,
-                        accelerator.unwrap_model(text_encoder1),
-                        accelerator.unwrap_model(text_encoder2),
-                        accelerator.unwrap_model(unet),
-                        vae,
-                        logit_scale,
-                        ckpt_info
-                    )
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                    progress_bar.write(f"model saved at `{p}`")
-                # accelerator.wait_for_everyone()
-
-            if config.sample_every_n_epochs and (epoch + 1) % config.sample_every_n_epochs == 0:
-                try:
-                    sdxl_eval_utils.sample_during_train(
-                        pipe_class=SdxlStableDiffusionLongPromptWeightingPipeline,
-                        accelerator=accelerator,
-                        config=config,
-                        epoch=epoch + 1,
-                        steps=global_step,
-                        vae=vae,
-                        tokenizer=[tokenizer1, tokenizer2],
-                        text_encoder=[text_encoder1, text_encoder2],
-                        unet=unet,
-                        device=accelerator.device,
-                    )
-                except Exception as e:
-                    logger.print("exception when sample images:", e)
-                    traceback.print_exc()
-                    pass
+            train_state.save(on_epoch_end=True)
+            train_state.sample(on_epoch_end=True)
+            if train_state.global_step >= num_train_steps:
+                break
 
     except KeyboardInterrupt:
-        do_save = is_main_process and config.save_on_keyboard_interrupt
+        save_on_train_end = is_main_process and config.save_on_keyboard_interrupt
         logger.print("KeyboardInterrupted.")
     except Exception as e:
-        do_save = is_main_process and config.save_on_exception
+        save_on_train_end = is_main_process and config.save_on_exception
         logger.print("Exception:", e)
         traceback.print_exc()
     else:
-        do_save = is_main_process and config.save_on_train_end
+        save_on_train_end = is_main_process and config.save_on_train_end
 
-    progress_bar.close()
-
-    unet = accelerator.unwrap_model(unet)
-    text_encoder1 = accelerator.unwrap_model(text_encoder1)
-    text_encoder2 = accelerator.unwrap_model(text_encoder2)
-
+    pbar.close()
     accelerator.wait_for_everyone()
+    if save_on_train_end:
+        train_state.save()
     accelerator.end_training()
-
-    if do_save and is_main_process:
-        logger.print("saving model on train end...")
-        p = sdxl_train_utils.save_sdxl_model_during_train(
-            config,
-            save_dtype,
-            epoch + 1,
-            global_step + 1,
-            text_encoder1,
-            text_encoder2,
-            unet,
-            vae,
-            logit_scale,
-            ckpt_info
-        )
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
-        logger.print(log_utils.green(f"model saved at {p}"))
-
     logger.print(log_utils.green(f"training finished at process {local_process_index+1}/{num_processes}"), disable=False)
     del accelerator
 

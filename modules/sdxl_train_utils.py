@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import math
 import os
 import time
@@ -539,10 +540,7 @@ def get_optimizer(config, trainable_params):
         optimizer_class = getattr(optimizer_module, optimizer_type)
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
-    optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
-    optimizer_args = ",".join([f"{k}={v}" for k, v in optimizer_kwargs.items()])
-
-    return optimizer_name, optimizer_args, optimizer
+    return optimizer
 
 
 def get_scheduler_fix(config, optimizer: Optimizer, num_train_steps):
@@ -790,7 +788,7 @@ def get_noise_noisy_latents_and_timesteps(config, noise_scheduler, latents):
     max_timestep = noise_scheduler.config.num_train_timesteps if config.max_timestep is None else config.max_timestep
 
     if config.timestep_sampler_type == "uniform":
-        timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device=latents.device)
+        timesteps = torch.randint(min_timestep, max_timestep, (b_size,), device=latents.device)  # timestep is in [min_timestep, max_timestep)
         timesteps = timesteps.long()
     elif config.timestep_sampler_type == "logit_normal":  # Rectified Flow from SD3 paper (partial implementation)
         from .rectified_flow import logit_normal
@@ -798,15 +796,13 @@ def get_noise_noisy_latents_and_timesteps(config, noise_scheduler, latents):
         m = timestep_sampler_kwargs.get('loc', 0) or timestep_sampler_kwargs.get('mean', 0) or timestep_sampler_kwargs.get('m', 0) or timestep_sampler_kwargs.get('mu', 0)
         s = timestep_sampler_kwargs.get('scale', 1) or timestep_sampler_kwargs.get('std', 1) or timestep_sampler_kwargs.get('s', 1) or timestep_sampler_kwargs.get('sigma', 1)
         timesteps = logit_normal(mu=m, sigma=s, shape=(b_size,), device=latents.device)  # sample from logistic normal distribution
-        timesteps = timesteps * (max_timestep - min_timestep) + min_timestep  # scale to [min_timestep, max_timestep]
+        timesteps = timesteps * (max_timestep - min_timestep) + min_timestep  # scale to [min_timestep, max_timestep)
         timesteps = timesteps.long()
 
     # Add noise to the latents according to the noise magnitude at each timestep
     # (this is the forward diffusion process)
     if config.ip_noise_gamma:
         noisy_latents = noise_scheduler.add_noise(latents, noise + config.ip_noise_gamma * torch.randn_like(latents), timesteps)
-    # elif args.timestep_sampler_type == "logit_normal":
-    #     noisy_latents = (1 - timesteps) * latents + timesteps * noise
     else:
         noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
@@ -834,9 +830,9 @@ def save_sdxl_model_during_train(
     logit_scale,
     ckpt_info,
 ):
-    ckpt_file = os.path.join(config.output_dir, config.output_subdir.models, f"{os.path.basename(config.output_dir)}_ep{epoch}_step{global_step}.safetensors")
+    save_path = os.path.join(config.output_dir, config.output_subdir.models, f"{os.path.basename(config.output_dir)}_ep{epoch}_step{global_step}.safetensors")
     sdxl_model_utils.save_stable_diffusion_checkpoint(
-        ckpt_file,
+        save_path,
         text_encoder1,
         text_encoder2,
         unet,
@@ -847,18 +843,54 @@ def save_sdxl_model_during_train(
         logit_scale,
         save_dtype,
     )
-    return ckpt_file
+    return save_path
+
+
+def save_train_state_during_train(
+    config,
+    optimizer,
+    lr_scheduler,
+    epoch: int,
+    global_step: int,
+):
+    save_path = os.path.join(config.output_dir, config.output_subdir.train_state, f"{os.path.basename(config.output_dir)}_train-state_ep{epoch}_step{global_step}.pth")
+    sdxl_model_utils.save_train_state(
+        save_path,
+        optimizer,
+        lr_scheduler,
+        epoch,
+        global_step,
+    )
+    return save_path
+
+
+def resume_train_state(config, optimizer, lr_scheduler):
+    train_state_path = config.resume_from
+    epoch, global_step = sdxl_model_utils.load_train_state(train_state_path, optimizer, lr_scheduler)
+    logger.print(f"resume train state from: `{log_utils.yellow(train_state_path)}`")
+    return epoch, global_step
+
+
+def n_params(module):
+    return sum(param.numel() for param in module.parameters())
 
 
 class LossRecorder:
-    def __init__(self, gamma=0.9):
+    r"""
+    Class to record better losses.
+    """
+
+    def __init__(self, gamma=0.9, max_window=None):
         self.losses = []
         self.gamma = gamma
         self.ema = 0
         self.t = 0
+        self.max_window = max_window
 
     def add(self, *, loss: float) -> None:
         self.losses.append(loss)
+        if self.max_window is not None and len(self.losses) > self.max_window:
+            self.losses.pop(0)
         self.t += 1
         ema = self.ema * self.gamma + loss * (1 - self.gamma)
         ema_hat = ema / (1 - self.gamma ** self.t) if self.t < 500 else ema
@@ -868,3 +900,141 @@ class LossRecorder:
         if len(self.losses) < window:
             window = len(self.losses)
         return sum(self.losses[-window:]) / window
+
+
+class TrainState:
+    r"""
+    Class to manage training state.
+    """
+
+    def __init__(
+        self,
+        config,
+        accelerator,
+        optimizer,
+        lr_scheduler,
+        train_dataloader,
+        unet,
+        text_encoder1,
+        text_encoder2,
+        tokenizer1,
+        tokenizer2,
+        vae,
+        logit_scale,
+        ckpt_info,
+        save_dtype,
+    ):
+        self.config = config
+        self.accelerator = accelerator
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
+        self.train_dataloader = train_dataloader
+        self.unet = unet
+        self.text_encoder1 = text_encoder1
+        self.text_encoder2 = text_encoder2
+        self.tokenizer1 = tokenizer1
+        self.tokenizer2 = tokenizer2
+        self.vae = vae
+        self.logit_scale = logit_scale
+        self.ckpt_info = ckpt_info
+        self.save_dtype = save_dtype
+
+        self.setup()
+
+    def setup(self):
+        self.total_batch_size = self.config.batch_size * self.config.gradient_accumulation_steps * self.accelerator.num_processes
+        self.num_train_epochs = self.config.num_train_epochs
+        self.num_steps_per_epoch = math.ceil(len(self.train_dataloader) / self.config.gradient_accumulation_steps / self.accelerator.num_processes)
+        self.num_train_steps = self.num_train_epochs * self.num_steps_per_epoch
+
+        self.output_model_dir = os.path.join(self.config.output_dir, self.config.output_subdir.models)
+        self.output_train_state_dir = os.path.join(self.config.output_dir, self.config.output_subdir.train_state)
+
+        self.global_step = 0
+
+    def step(self):
+        self.global_step += 1
+
+    @property
+    def epoch(self):
+        return self.global_step // self.num_steps_per_epoch
+
+    def _save_model(self):
+        logger.print(f"saving model at epoch {self.epoch}, step {self.global_step}...")
+        save_path = os.path.join(self.output_model_dir, f"{os.path.basename(self.config.output_dir)}_ep{self.epoch}_step{self.global_step}.safetensors")
+        sdxl_model_utils.save_stable_diffusion_checkpoint(
+            fp=save_path,
+            unet=self.accelerator.unwrap_model(self.unet),
+            text_encoder1=self.accelerator.unwrap_model(self.text_encoder1),
+            text_encoder2=self.accelerator.unwrap_model(self.text_encoder2),
+            epochs=self.epoch,
+            steps=self.global_step,
+            ckpt_info=self.ckpt_info,
+            vae=self.vae,
+            logit_scale=self.logit_scale,
+            save_dtype=self.save_dtype,
+        )
+        logger.print(f"model saved to: `{log_utils.yellow(save_path)}`")
+
+    def _save_train_state(self):
+        logger.print(f"saving train state at epoch {self.epoch}, step {self.global_step}...")
+        save_path = os.path.join(self.output_train_state_dir, f"{os.path.basename(self.config.output_dir)}_train-state_ep{self.epoch}_step{self.global_step}")
+        self.accelerator.save_state(save_path)
+        logger.print(f"train state saved to: `{log_utils.yellow(save_path)}`")
+
+    def save(self, on_epoch_end=False):
+        on_step_end = not on_epoch_end
+        do_save = bool(on_step_end and self.global_step and self.config.save_every_n_steps and self.global_step % self.config.save_every_n_steps == 0)
+        do_save |= bool(on_epoch_end and self.epoch and self.config.save_every_n_epochs and self.epoch % self.config.save_every_n_epochs == 0)
+        do_save &= bool(self.config.save_model or self.config.save_train_state)
+        if do_save:
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                if self.config.save_model:
+                    self._save_model()
+                if self.config.save_train_state:
+                    self._save_train_state()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    gc.collect()
+            self.accelerator.wait_for_everyone()
+
+    def sample(self, on_epoch_end=False):
+        on_step_end = not on_epoch_end
+        do_sample = bool(on_step_end and self.global_step and self.config.sample_every_n_steps and self.global_step % self.config.sample_every_n_steps == 0)
+        do_sample |= bool(on_epoch_end and self.epoch and self.config.sample_every_n_epochs and self.epoch % self.config.sample_every_n_epochs == 0)
+        if do_sample:
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                from .sdxl_eval_utils import sample_during_train
+                from .sdxl_lpw_stable_diffusion import SdxlStableDiffusionLongPromptWeightingPipeline
+                try:
+                    sample_during_train(
+                        pipe_class=SdxlStableDiffusionLongPromptWeightingPipeline,
+                        accelerator=self.accelerator,
+                        config=self.config,
+                        epoch=self.epoch if on_epoch_end else None,
+                        steps=self.global_step,
+                        unet=self.unet,
+                        text_encoder=[self.text_encoder1, self.text_encoder2],
+                        vae=self.vae,
+                        tokenizer=[self.tokenizer1, self.tokenizer2],
+                        device=self.accelerator.device,
+                    )
+
+                except Exception as e:
+                    import traceback
+                    logger.print(log_utils.red("exception when sample images:", e))
+                    traceback.print_exc()
+                    pass
+            self.accelerator.wait_for_everyone()
+
+    def resume(self):
+        if self.config.resume_from:
+            self.accelerator.load_state(self.config.resume_from)
+            self.global_step = self.accelerator.step
+            logger.print(f"train state loaded from: `{log_utils.yellow(self.config.resume_from)}`")
+
+    def pbar(self):
+        from tqdm import tqdm
+        return tqdm(total=self.num_train_steps, initial=self.global_step, desc='steps', disable=not self.accelerator.is_local_main_process)

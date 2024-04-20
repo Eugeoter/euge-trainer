@@ -21,7 +21,7 @@ def get_config():
     config.clip_skip = 1
 
     # OS Parameters
-    config.output_dir = 'eval-1'
+    config.output_dir = 'eval/eval-1'
     config.full_bf16 = False
     config.full_fp16 = False
     config.mixed_precision = 'fp16'

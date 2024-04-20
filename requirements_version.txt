@@ -2,9 +2,9 @@ opencv-python
 pillow
 scipy
 aiofiles
-xformers
-torch
-torchvision
+xformers==0.0.20
+torch==2.0.1
+torchvision==0.15.2
 transformers==4.30.2
 diffusers
 safetensors

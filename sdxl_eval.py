@@ -12,6 +12,8 @@ from modules.sdxl_lpw_stable_diffusion import SdxlStableDiffusionLongPromptWeigh
 def eval(argv):
     config = flags.FLAGS.config
     accelerator = sdxl_eval_utils.prepare_accelerator(config)
+    for lg in log_utils.get_all_loggers().values():
+        lg.disable = not accelerator.is_main_process
 
     is_main_process = accelerator.is_main_process
     local_process_index = accelerator.state.local_process_index

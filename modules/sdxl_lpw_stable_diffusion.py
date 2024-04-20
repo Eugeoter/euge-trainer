@@ -181,7 +181,7 @@ def get_prompts_with_weights(pipe: StableDiffusionPipeline, prompt: List[str], m
         tokens.append(text_token)
         weights.append(text_weight)
     if truncated:
-        logger.print(log_utils.yellow("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples"))
+        logger.print(log_utils.magenta("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples"))
     return tokens, weights
 
 
@@ -576,7 +576,7 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
 
         # do not move Text Encoders to device, because Text Encoder should be on CPU
 
-    @property
+    @ property
     def _execution_device(self):
         r"""
         Returns the device on which the pipeline's models will be executed. After calling
@@ -773,7 +773,7 @@ class SdxlStableDiffusionLongPromptWeightingPipeline:
             latents = self.scheduler.add_noise(init_latents, noise, timestep)
             return latents, init_latents_orig, noise
 
-    @torch.no_grad()
+    @ torch.no_grad()
     def __call__(
         self,
         prompt: Union[str, List[str]],
