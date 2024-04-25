@@ -44,6 +44,7 @@ class ImageInfo:
         description: str = None,
         image_size=None,  # (w, h)
         original_size=None,  # (w, h)
+        crop_ltrb=None,
         latent_size=None,  # (w, h)
         bucket_size=None,
         num_repeats=1,
@@ -58,6 +59,7 @@ class ImageInfo:
         self.image_path = image_path
         self.image_size = image_size
         self.original_size = original_size
+        self.crop_ltrb = crop_ltrb
         self.latent_size = latent_size
         self.bucket_size = bucket_size
         self.num_repeats = num_repeats
@@ -177,6 +179,8 @@ class Dataset(torch.utils.data.Dataset):
         # load img_size_record
         if self.records_dir:
             img_size_log_path = self.records_dir / "image_size.json"
+            n_rep_log_path = self.records_dir / "num_repeats.json"
+            counter_log_path = self.records_dir / "counter.json"
             img_size_record = {}
             if img_size_log_path.is_file():
                 try:
@@ -189,12 +193,8 @@ class Dataset(torch.utils.data.Dataset):
             else:
                 self.logger.print(log_utils.yellow(f"no existing `image size` record found: {img_size_log_path}"))
 
-            n_rep_log_path = self.records_dir / "num_repeats.json"
             num_repeats_record = {}
 
-        self.counter = count_metadata(self.metadata)
-
-        pbar = self.logger.tqdm(total=len(self.metadata), desc=f"loading dataset")
         logs = {}
         log_counter = {
             'caption': 0,
@@ -202,8 +202,10 @@ class Dataset(torch.utils.data.Dataset):
             'missing': 0,
         }
 
+        pbar = self.logger.tqdm(total=len(self.metadata), desc=f"searching dataset")
+
         @log_utils.track_tqdm(pbar)
-        def load_data(img_key, img_md):
+        def search_data(img_key, img_md):
             # 1. search image or cache file
             # 1.1 search from metadata
             if img_path := img_md.get('image_path'):
@@ -225,10 +227,34 @@ class Dataset(torch.utils.data.Dataset):
                 if img_path is None:
                     img_path = search_file(stem2files[img_key], exts=img_exts)
                 npz_path = search_file(stem2files[img_key], exts=('.npz',))
-            # missing file
-            if img_path is None and npz_path is None:
+
+            img_md['missing'] = img_path is None and npz_path is None
+            # img_md['image_path'] = img_path
+            img_md['npz_path'] = npz_path
+
+        if self.max_workers > 1:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = [executor.submit(search_data, img_key, img_md) for img_key, img_md in self.metadata.items()]
+                wait(futures)
+        else:
+            for img_key, img_md in self.metadata.items():
+                search_data(img_key, img_md)
+
+        for img_key in list(self.metadata.keys()):
+            img_md = self.metadata[img_key]
+            if img_md.get('missing'):
                 log_counter['missing'] += 1
-                return  # skip
+                del self.metadata[img_key]
+
+        pbar.close()
+        self.counter = count_metadata(self.metadata)
+        pbar = self.logger.tqdm(total=len(self.metadata), desc=f"loading dataset")
+
+        @log_utils.track_tqdm(pbar)
+        def load_data(img_key, img_md):
+            # 1. get image_path and npz_path
+            img_path = img_md.get('image_path')
+            npz_path = img_md.get('npz_path')
 
             # 2. get num_repeats
             num_repeats = self.num_repeats_getter(img_key, img_md, counter=self.counter)
@@ -271,13 +297,6 @@ class Dataset(torch.utils.data.Dataset):
             artist = img_md.get('artist', None)
             if artist is not None and artist not in logs:
                 logs[artist] = num_repeats
-
-            # if npz_path:
-            #     latents, latents_flipped = load_latents_from_disk(npz_path, dtype=self.dtype)
-            #     if latents is None:
-            #         raise RuntimeError(f"failed to load latents from disk: `{img_key}`. Please check if the cached latent is valid.")
-            #     if latents_flipped is None and self.flip_aug:
-            #         raise RuntimeError(f"failed to load flipped latents from disk: `{img_key}`. Please check if the cached latent is valid.")
 
             img_info = ImageInfo(
                 key=img_key,
@@ -323,6 +342,9 @@ class Dataset(torch.utils.data.Dataset):
                 with open(img_size_log_path, 'w') as f:
                     json.dump(img_size_record, f)
                 self.logger.print(f"records to: `{log_utils.yellow(self.records_dir)}`")
+                counter_log_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(counter_log_path, 'w') as f:
+                    json.dump(self.counter, f)
 
         # count metadata again
         self.counter = count_metadata(self.metadata)
@@ -414,7 +436,12 @@ class Dataset(torch.utils.data.Dataset):
                 if not check_validity:
                     pbar.update(1)
                     continue
-                latents, latents_flipped = load_latents_from_disk(image_info.npz_path, flip_aug=self.flip_aug, dtype=self.latents_dtype, is_main_process=self.is_main_process)
+                latents, latents_flipped, orig_size, crop_ltrb = load_latents_from_disk(image_info.npz_path, flip_aug=self.flip_aug, dtype=self.latents_dtype, is_main_process=self.is_main_process)
+                if orig_size is not None:
+                    image_info.original_size = orig_size
+                if crop_ltrb is not None:
+                    image_info.crop_ltrb = crop_ltrb
+
                 image_info.latents = latents
                 image_info.latents_flipped = latents_flipped
                 # print(f"check latents: {image_info.key} | {image_info.npz_path}")
@@ -509,7 +536,11 @@ class Dataset(torch.utils.data.Dataset):
                 image = None
             elif img_info.npz_path is not None:  # load latents from disk
                 # logu.debug(f"Load latents from disk: {image_info.key}")
-                latents, latents_flipped = load_latents_from_disk(img_info.npz_path, flip_aug=self.flip_aug, dtype=self.latents_dtype, is_main_process=self.is_main_process)
+                latents, latents_flipped, orig_size, crop_ltrb = load_latents_from_disk(img_info.npz_path, flip_aug=self.flip_aug, dtype=self.latents_dtype, is_main_process=self.is_main_process)
+                if orig_size is not None:
+                    img_info.original_size = orig_size
+                if crop_ltrb is not None:
+                    img_info.crop_ltrb = crop_ltrb
                 if latents is None or (flipped and latents_flipped is None):
                     raise RuntimeError(f"Invalid latents: {img_info.npz_path}")
                 if self.keep_cached_latents_in_memory:
@@ -538,7 +569,7 @@ class Dataset(torch.utils.data.Dataset):
             #     1] >= 3, f"target size must be at least 3, but got target_size: {target_size} | image_shape: {image.shape if image is not None else None} | latents_shape: {latents.shape if latents is not None else None}"
 
             orig_size = img_info.original_size or img_info.image_size
-            crop_ltrb = (0, 0, 0, 0)  # ! temporary set to 0: no crop at all
+            crop_ltrb = img_info.crop_ltrb or (0, 0, 0, 0)  # ! temporary set to 0: no crop at all
             if not flipped:
                 crop_left_top = (crop_ltrb[0], crop_ltrb[1])
             else:
@@ -861,9 +892,11 @@ def open_cache(npz_path, mmap_mode=None, is_main_process=True):
 def load_latents_from_disk(npz_path, dtype=None, flip_aug=True, mmap_mode=None, is_main_process=True):
     npz = open_cache(npz_path, mmap_mode=mmap_mode, is_main_process=is_main_process)
     if npz is None:
-        return None, None
+        return None, None, None, None
     latents = npz["latents"]
     flipped_latents = npz["latents_flipped"] if "latents_flipped" in npz else None
+    orig_size = npz["original_size"].tolist() if "original_size" in npz else None
+    crop_ltrb = npz["crop_ltrb"].tolist() if "crop_ltrb" in npz else None
     latents = torch.FloatTensor(latents).to(dtype=dtype)
     flipped_latents = torch.FloatTensor(flipped_latents).to(dtype=dtype) if flipped_latents is not None else None
 
@@ -874,7 +907,7 @@ def load_latents_from_disk(npz_path, dtype=None, flip_aug=True, mmap_mode=None, 
         flipped_latents = torch.where(torch.isnan(flipped_latents), torch.zeros_like(flipped_latents), flipped_latents)
         print(f"NaN detected in flipped latents: {npz_path}")
 
-    return latents, flipped_latents
+    return latents, flipped_latents, orig_size, crop_ltrb
 
 
 def check_cached_latents(image_info, latents):
@@ -887,7 +920,7 @@ def check_cached_latents(image_info, latents):
     return latents_hw == bucket_reso_hw
 
 
-def save_latents_to_disk(npz_path, latents_tensor, flipped_latents_tensor=None):
+def save_latents_to_disk(npz_path, latents_tensor, original_size, crop_ltrb, flipped_latents_tensor=None):
     kwargs = {}
     if flipped_latents_tensor is not None:
         kwargs["latents_flipped"] = flipped_latents_tensor.float().cpu().numpy()
@@ -895,6 +928,8 @@ def save_latents_to_disk(npz_path, latents_tensor, flipped_latents_tensor=None):
         np.savez(
             npz_path,
             latents=latents_tensor.float().cpu().numpy(),
+            original_size=np.array(original_size),
+            crop_ltrb=np.array(crop_ltrb),
             **kwargs,
         )
     except KeyboardInterrupt:
@@ -903,7 +938,7 @@ def save_latents_to_disk(npz_path, latents_tensor, flipped_latents_tensor=None):
         raise RuntimeError(f"Failed to save latents to {npz_path}")
 
 
-async def save_latents_to_disk_async(npz_path, latents_tensor, flipped_latents_tensor=None):
+async def save_latents_to_disk_async(npz_path, latents_tensor, original_size, crop_ltrb, flipped_latents_tensor=None):
     from io import BytesIO
     kwargs = {}
     if flipped_latents_tensor is not None:
@@ -911,7 +946,13 @@ async def save_latents_to_disk_async(npz_path, latents_tensor, flipped_latents_t
 
     # 使用BytesIO作为临时内存文件
     buffer = BytesIO()
-    np.savez(buffer, latents=latents_tensor.float().cpu().numpy(), **kwargs)
+    np.savez(
+        buffer,
+        latents=latents_tensor.float().cpu().numpy(),
+        original_size=np.array(original_size),
+        crop_ltrb=np.array(crop_ltrb),
+        **kwargs,
+    )
 
     # 将BytesIO缓冲区的内容异步写入磁盘
     buffer.seek(0)  # 重置buffer的位置到开始
@@ -956,7 +997,9 @@ def cache_batch_latents(image_infos: List[ImageInfo], vae, cache_to_disk, flip_a
 
             if cache_to_disk:
                 npz_path = os.path.splitext(info.image_path)[0] + ".npz"
-                save_latents_to_disk(npz_path, latent, flipped_latent)
+                orig_size = info.original_size or info.image_size
+                crop_ltrb = (0, 0, 0, 0)  # ! temporary set to 0: no crop at all
+                save_latents_to_disk(npz_path, latent, original_size=orig_size, crop_ltrb=crop_ltrb, flipped_latents_tensor=flipped_latent)
                 info.npz_path = npz_path
 
             if not cache_only:
@@ -967,10 +1010,12 @@ def cache_batch_latents(image_infos: List[ImageInfo], vae, cache_to_disk, flip_a
         async def save_latents():
             tasks = []
             iterator = zip(image_infos, latents, flipped_latents)
-            for info, latent, flipped_latent in iterator:
-                if cache_to_disk:
+            if cache_to_disk:
+                for info, latent, flipped_latent in iterator:
                     npz_path = os.path.splitext(info.image_path)[0] + ".npz"
-                    task = asyncio.create_task(save_latents_to_disk_async(npz_path, latent, flipped_latent))
+                    orig_size = info.original_size or info.image_size
+                    crop_ltrb = (0, 0, 0, 0)  # ! temporary set to 0: no crop at all
+                    task = asyncio.create_task(save_latents_to_disk_async(npz_path, latent, original_size=orig_size, crop_ltrb=crop_ltrb, flipped_latents_tensor=flipped_latent))
                     info.npz_path = npz_path
                     tasks.append(task)
 
@@ -1048,6 +1093,9 @@ def fmt2dan(tag):
 
 
 def count_metadata(metadata):
+    r"""
+    Count useful information from metadata.
+    """
     counter = {
         "category": {},
         "artist": {},
@@ -1057,7 +1105,8 @@ def count_metadata(metadata):
     }
     for img_key, img_md in metadata.items():
         num_repeats = img_md.get('num_repeats', 1)
-        category = os.path.basename(os.path.dirname(img_md['image_path']))
+        src_path = img_md.get('image_path') or img_md.get('npz_path')
+        category = os.path.basename(os.path.dirname(src_path))
         if category not in counter["category"]:
             counter["category"][category] = 0
         counter["category"][category] += num_repeats
@@ -1085,4 +1134,8 @@ def count_metadata(metadata):
             if quality not in counter["quality"]:
                 counter["quality"][quality] = 0
             counter["quality"][quality] += num_repeats
+    # sort
+    for key in counter:
+        counter[key] = dict(sorted(counter[key].items(), key=lambda x: x[1], reverse=True))
+
     return counter

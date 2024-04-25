@@ -8,6 +8,7 @@
 | **image_dirs**                    | 图像文件夹路径列表         | list     | 是       |                                                                                              |
 | **metadata_files**                | 元数据文件路径列表         | list     | 是       |                                                                                              |
 | **output_dir**                    | 项目输出文件夹路径         | str      | 是       |                                                                                              |
+| resume_from                       | 恢复训练路径               | str      | 否       | 指向一个保存训练状态的文件夹                                                                 |
 | vae                               | VAE 模型路径               | str      | 否       | 指向一个 safetensors 的 vae 模型文件。将覆盖大模型自带的 vae。                               |
 | no_half_vae                       | 不使用半精度训练 VAE       | bool     | 否       | 见[VAE 精度](#vae-精度)                                                                      |
 | tokenizer_cache_dir               | 分词器缓存路径             | str      | 否       |                                                                                              |
@@ -20,6 +21,9 @@
 | loss_recorder_kwargs              | 损失记录器参数             | cfg      | 否       |                                                                                              |
 | loss_recorder_kwargs.gamma        | 损失记录器的遗忘因子       | float    | 否       | 0~1 之间。数值越大越接近当前 loss。                                                          |
 | loss_recorder_kwargs.stride       | 损失记录器记录的步幅       | int      | 否       | 记录最近平均 loss 时的步长。越小越接近当前 loss                                              |
+| output_name                       | 输出文件名                 | str      | 否       | 每个子项设为 None 时为默认名称                                                               |
+| save_model                        | 保存模型                   | bool     | 否       | 启用时，保存模型                                                                             |
+| save_train_state                  | 保存训练状态               | bool     | 否       | 启用时，保存训练状态                                                                         |
 | save_precision                    | 保存精度                   | str      | 否       | 通常与训练的混合精度相同。                                                                   |
 | save_every_n_epochs               | 每 n 轮保存一次模型        | int      | 否       | 为 None 时不启用                                                                             |
 | save_every_n_steps                | 每 n 步保存一次模型        | int      | 否       | 为 None 时不启用                                                                             |
@@ -51,13 +55,13 @@
 | xformers                          | 使用 xformers              | bool     | 否       | 启用时，以轻微质量效果为代价，大大加速训练并降低显存占用。                                   |
 | diffusers_xformers                | 使用 diffusers xformers    | bool     | 否       |                                                                                              |
 | sdpa                              | 使用 sdpa                  | bool     | 否       |                                                                                              |
-| clip_skip                         | 裁剪跳过次数               | int      | 否       | 通常为 1 或 2。                                                                              |
+| clip_skip                         | 裁剪跳过次数               | int      | 否       | 通常为 1。                                                                                   |
 | noise_offset                      | 噪声偏移量                 | float    | 否       | 偏移初始噪声以帮助模型生成很暗或很亮的图像。                                                 |
 | multires_noise_iterations         | 多分辨率噪声迭代次数       | int      | 否       |                                                                                              |
 | multires_noise_discount           | 多分辨率噪声折扣           | float    | 否       |                                                                                              |
 | adaptive_noise_scale              | 自适应噪声缩放             | float    | 否       |                                                                                              |
 | max_grad_norm                     | 最大梯度                   | float    | 否       |                                                                                              |
-| zero_terminal_snr                 | 零终端信噪比               | bool     | 否       | 启用时，强制归零时间步的信噪比。提高对数据集的还原度。                                       |
+| zero_terminal_snr                 | 零终端信噪比               | bool     | 否       | 启用时，强制归零时间步的信噪比。提高对数据集的还原度。仅限 V 预测是使用。                    |
 | ip_noise_gamma                    | 扰动噪声伽马               | float    | 否       |                                                                                              |
 | min_snr_gamma                     | 最小信噪比伽马             | float    | 否       | 限制模型低时间步下的学习能力。加快拟合速度的同时防止死磕小细节。数值越低效果越强。           |
 | scale_v_pred_loss_like_noise_pred | V 预测样本预测损失缩放     | bool     | 否       |                                                                                              |
@@ -79,7 +83,7 @@
 | cache_latents                     | 缓存潜变量                 | bool     | 否       | 启用时，将缓存并使用缓存的潜变量参与训练。以内存和训练前的准备换取训练速度。非常建议启用。   |
 | cache_latents_to_disk             | 缓存潜变量到磁盘           | bool     | 否       | 启用时，将缓存的潜变量保存到磁盘。非常建议启用，除非您愿意承担报错而导致缓存结果丢失的后果。 |
 | check_cache_validity              | 检查缓存有效性             | bool     | 否       | 启用时，将提前检查缓存文件是否有效，若您确保有效则可选择关闭以节省时间。                     |
-| keep_cached_latents_in_memory     | 保持缓存潜变量在内存中     | bool     | 否       | 启用时，将加载后的潜变量保存到内存中，以内存换速度。                                         |
+| keep_cached_latents_in_memory     | 保持缓存潜变量在内存中     | bool     | 否       | 启用时，将加载后的潜变量保存到内存中，以训练时的内存占用换取训练速度。训练集大时不建议启用。 |
 | async_cache                       | 异步缓存                   | bool     | 否       | 启用时，稍微加速缓存潜变量到磁盘。                                                           |
 
 # 参数介绍
@@ -88,9 +92,12 @@
 
 训练器的输出路径由参数 `output_dir` 指定。您可以使用格式化字符串来指定输出路径。输出文件夹内包含以下子目录
 
-- `models`：保存训练过程中的模型文件。
-- `samples`：保存训练过程中的采样文件。
-- `logs`：保存训练过程中的日志文件。
+- `models`：保存训练过程中的模型。
+- `samples`：保存训练过程中的采样结果。
+- `logs`：保存训练过程中的日志。
+- `train_state`: 保存训练过程中的训练状态。
+
+输出路径文件的文件名默认由 `output_dir` 的最后一层文件夹名称决定，您可以通过参数 `output_name` 改变输出模型和训练状态的文件名。
 
 ## VAE 精度
 
@@ -108,12 +115,12 @@ SDXL 官方发布的 VAE 存在缺陷，即在半精度（fp16）时会输出纯
 
 ## 学习率和优化器
 
-训练的学习率和优化器高度相关。以下是几种受欢迎的搭配：
+训练的学习率和优化器高度相关。以下是几种受欢迎的搭配，仅供参考。
 
 | 优化器类型 | 优化器参数                                                    | 学习率调度器         | 学习率 | 预热步数 | 学习率参数 | 说明                                               |
 | ---------- | ------------------------------------------------------------- | -------------------- | ------ | -------- | ---------- | -------------------------------------------------- |
 | Adafactor  | relative_step=False, scale_parameter=False, warmup_init=False | constant_with_warmup | 1e-5   | 250      |            | 适用于[等效批量](#等效批量)为 64~ 128 的大批量训练 |
-| AdamW      |                                                               | cosine_with_restarts | 1e-5   | 250      |            | 适用于[等效批量](#等效批量)为 32~ 64 的小批量训练  |
+| AdamW      | weight_decay=0.1, betas=(0.9, 0.99)                           | cosine_with_restarts | 5e-6   | 250      |            | 适用于[等效批量](#等效批量)为 32~ 64 的小批量训练  |
 
 ## 等效批量
 

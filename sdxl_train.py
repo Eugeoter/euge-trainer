@@ -338,8 +338,8 @@ def train(argv):
                 if accelerator.sync_gradients:
                     pbar.update(1)
                     train_state.step()
-                    train_state.save(on_epoch_end=False)
-                    train_state.sample(on_epoch_end=False)
+                    train_state.save(on_step_end=True)
+                    train_state.sample(on_step_end=True)
 
                 # loggings
                 step_loss: float = loss.detach().item()
@@ -387,7 +387,8 @@ def train(argv):
     pbar.close()
     accelerator.wait_for_everyone()
     if save_on_train_end:
-        train_state.save()
+        logger.print(f"saving on train end...")
+        train_state.save(on_train_end=True)
     accelerator.end_training()
     logger.print(log_utils.green(f"training finished at process {local_process_index+1}/{num_processes}"), disable=False)
     del accelerator

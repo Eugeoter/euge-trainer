@@ -1,3 +1,5 @@
+# 仅供参考，直接使用会报错。
+
 import random
 from ml_collections import ConfigDict
 

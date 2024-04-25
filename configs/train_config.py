@@ -34,9 +34,13 @@ def get_config():
     # OS Parameters
     config.output_subdir = cfg(
         models='models',
+        train_state='train_state',
         samples='samples',
         logs='logs',
-        train_state='train_state',
+    )
+    config.output_name = cfg(
+        models=None,
+        train_state=None,
     )
     config.loss_recorder_kwargs = cfg(
         gamma=0.9,

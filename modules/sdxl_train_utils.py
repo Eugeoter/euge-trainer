@@ -950,6 +950,13 @@ class TrainState:
         self.output_model_dir = os.path.join(self.config.output_dir, self.config.output_subdir.models)
         self.output_train_state_dir = os.path.join(self.config.output_dir, self.config.output_subdir.train_state)
 
+        output_name_default = os.path.basename(self.config.output_dir)
+        self.output_name = dict(
+            models=self.config.output_name.models or output_name_default,
+            # samples=self.config.output_name.samples or output_name_default,
+            train_state=self.config.output_name.train_state or output_name_default,
+        )
+
         self.global_step = 0
 
     def step(self):
@@ -961,7 +968,7 @@ class TrainState:
 
     def _save_model(self):
         logger.print(f"saving model at epoch {self.epoch}, step {self.global_step}...")
-        save_path = os.path.join(self.output_model_dir, f"{os.path.basename(self.config.output_dir)}_ep{self.epoch}_step{self.global_step}.safetensors")
+        save_path = os.path.join(self.output_model_dir, f"{self.output_name['models']}_ep{self.epoch}_step{self.global_step}.safetensors")
         sdxl_model_utils.save_stable_diffusion_checkpoint(
             fp=save_path,
             unet=self.accelerator.unwrap_model(self.unet),
@@ -978,14 +985,15 @@ class TrainState:
 
     def _save_train_state(self):
         logger.print(f"saving train state at epoch {self.epoch}, step {self.global_step}...")
-        save_path = os.path.join(self.output_train_state_dir, f"{os.path.basename(self.config.output_dir)}_train-state_ep{self.epoch}_step{self.global_step}")
+        save_path = os.path.join(self.output_train_state_dir, f"{self.output_name['train_state']}_train-state_ep{self.epoch}_step{self.global_step}")
         self.accelerator.save_state(save_path)
         logger.print(f"train state saved to: `{log_utils.yellow(save_path)}`")
 
-    def save(self, on_epoch_end=False):
-        on_step_end = not on_epoch_end
-        do_save = bool(on_step_end and self.global_step and self.config.save_every_n_steps and self.global_step % self.config.save_every_n_steps == 0)
+    def save(self, on_step_end=False, on_epoch_end=False, on_train_end=False):
+        do_save = False
+        do_save |= bool(on_step_end and self.global_step and self.config.save_every_n_steps and self.global_step % self.config.save_every_n_steps == 0)
         do_save |= bool(on_epoch_end and self.epoch and self.config.save_every_n_epochs and self.epoch % self.config.save_every_n_epochs == 0)
+        do_save |= bool(on_train_end)
         do_save &= bool(self.config.save_model or self.config.save_train_state)
         if do_save:
             self.accelerator.wait_for_everyone()
@@ -999,10 +1007,11 @@ class TrainState:
                     gc.collect()
             self.accelerator.wait_for_everyone()
 
-    def sample(self, on_epoch_end=False):
-        on_step_end = not on_epoch_end
-        do_sample = bool(on_step_end and self.global_step and self.config.sample_every_n_steps and self.global_step % self.config.sample_every_n_steps == 0)
+    def sample(self, on_step_end=False, on_epoch_end=False, on_train_end=False):
+        do_sample = False
+        do_sample |= bool(on_step_end and self.global_step and self.config.sample_every_n_steps and self.global_step % self.config.sample_every_n_steps == 0)
         do_sample |= bool(on_epoch_end and self.epoch and self.config.sample_every_n_epochs and self.epoch % self.config.sample_every_n_epochs == 0)
+        do_sample |= bool(on_train_end)
         if do_sample:
             self.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process:
