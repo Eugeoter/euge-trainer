@@ -1,6 +1,6 @@
-# SDXL Trainer
+# Euge Trainer
 
-一个魔改 [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts) 的 SDXL 微调的项目。
+一个魔改 [kohya-ss/sd-scripts](https://github.com/kohya-ss/sd-scripts) 的 SD 微调的项目。
 
 # 特性
 
@@ -25,14 +25,27 @@
 ## 安装
 
 ```bash
-git clone https://github.com/Eugeoter/sdxl-trainer.git
-cd sdxl-trainer
+git clone https://github.com/Eugeoter/euge-trainer.git
+cd euge-trainer
+pip install -r requirements.txt
+```
+
+### Dev 版本安装（可选）
+
+Dev 版本支持 SD1.5、SDXL 和 SD3 的训练，但可能不稳定。
+
+```bash
+git clone https://github.com/Eugeoter/euge-trainer.git
+cd euge-trainer
+git checkout dev
 pip install -r requirements.txt
 ```
 
 ## 训练
 
 ### 准备数据
+
+#### 本地数据集
 
 准备好图像（或潜变量缓存）文件和同名的标注文件（或整一个元数据 json 文件），将图像（或潜变量缓存）文件放置在同一文件夹 image_dir 内。
 
@@ -50,7 +63,7 @@ pip install -r requirements.txt
 
 以下几种数据组织方式均可：
 
-#### a. 图像 + 图像同名 txt 标注文件：
+##### a. 图像 + 图像同名 txt 标注文件：
 
 ```
   image_dir
@@ -61,7 +74,7 @@ pip install -r requirements.txt
   ├── ...
 ```
 
-#### b. 缓存潜变量 + 潜变量同名 txt 标注文件：
+##### b. 缓存潜变量 + 潜变量同名 txt 标注文件：
 
 ```
   latent_dir
@@ -72,13 +85,13 @@ pip install -r requirements.txt
   ├── ...
 ```
 
-#### 元数据文件
+##### 元数据文件
 
 元数据文件是一个 json 文件，包含了一些数据的各种信息，如图像路径、标注、图像尺寸、美学评分等。训练时，可以用一个或多个元数据文件来描述数据集。
 
 使用元数据文件替代传统 txt 标注能简化数据集管理，不再需要为每个图像文件创建一个 txt 文件作为标注。其能够存储更多种类的数据信息。
 
-制作元数据文件可使用 [Waifuset](https://github.com/Eugeoter/waifuset) 项目 或 [kohya-ss](https://github.com/kohya-ss/sd-scripts)。是时候摆脱 txt 标注文件了。
+制作元数据文件可使用 [Waifuset](https://github.com/Eugeoter/waifuset) 项目的 dev 分支。是时候摆脱 txt 标注文件了。
 
 元数据 json 文件格式如下：
 
@@ -98,7 +111,7 @@ pip install -r requirements.txt
 }
 ```
 
-#### c. 图像 + 元数据 json 文件：
+##### c. 图像 + 元数据 json 文件：
 
 ```
   image_dir
@@ -108,7 +121,7 @@ pip install -r requirements.txt
   metadata.json
 ```
 
-#### d. 缓存潜变量 + 元数据 json 文件：
+##### d. 缓存潜变量 + 元数据 json 文件：
 
 ```
   latent_dir
@@ -118,20 +131,19 @@ pip install -r requirements.txt
   metadata.json
 ```
 
+#### HuggingFace 数据集
+
+您可以使用 HuggingFace 数据集。当 `metadata_files` 和 `image_dirs` 为空时，训练器会尝试从 `dataset_name_or_path` 指定的 HuggingFace 数据集中加载数据。
+图像列由参数 `dataset_image_column` 指定，标注列由参数 `dataset_caption_column` 指定。
+
 ### 配置参数
 
-在 [configs/train_config.py](configs/train_config.py) 内配置参数（或自行新建）后，执行 `accelerate launch sdxl_train.py --config configs/train_config.py` 即可开始训练。
+在 [configs/train_config.py](configs/config_train_sd3.py) 内配置参数（或自行新建）后，执行 `accelerate launch train_sd3.py --config configs/config_train_sd3.py` 即可开始训练。
 
-其中，`--config` 参数为配置文件路径，`configs/train_config.py` 为默认配置文件，您需要根据自己的需求修改配置文件，或指定您自己修改的配置文件路径。
+其中，`--config` 参数为配置文件路径，`configs/config_train_sd3.py` 为默认配置文件，您需要根据自己的需求修改配置文件，或指定您自己修改的配置文件路径。
 
 完整的参数介绍请参考 [docs/CONFIG.md](docs/CONFIG.md)。
 
 ### 多 GPU 训练
 
-将原本参数中的 `accelerate launch sdxl_train.py --config configs/train_config.py` 更换为 `accelerate launch --num_processes=4 --multi_gpu --gpu_ids=0,1,2,3 sdxl_train.py --config configs/train_config.py` 即可进行多 GPU 训练，其中 `--num_processes` 为进程数，`--gpu_ids` 为 GPU 编号。
-
-### 缓存潜变量
-
-建议单独提前缓存潜变量，以加速训练。
-
-缓存潜变量通过单独的脚本 `cache_latents.py` 运行。您可使用与训练相同的配置文件执行 `accelerate launch cache_latents.py --config configs/train_config.py` 缓存潜变量，缓存后的潜变量文件将被储存为 `{图像文件名}.npz` 的格式。您也可以用类似的方式进行多 GPU 缓存。
+将原本参数中的 `accelerate launch train_sd3.py --config configs/config_train_sd3.py` 更换为 `accelerate launch --num_processes=4 --multi_gpu --gpu_ids=0,1,2,3 train_sd3.py --config configs/config_train_sd3.py` 即可进行多 GPU 训练，其中 `--num_processes` 为进程数，`--gpu_ids` 为 GPU 编号。
