@@ -6,7 +6,8 @@ from safetensors.torch import load_file, save_file
 from transformers import CLIPTextModel, CLIPTextConfig, CLIPTextModelWithProjection, CLIPTokenizer
 from typing import List
 from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
-from . import model_utils, sdxl_original_unet, log_utils
+from . import model_utils, log_utils
+from ..models.sdxl_original_unet import SdxlUNet2DConditionModel
 
 VAE_SCALE_FACTOR = 0.13025
 MODEL_VERSION_SDXL_BASE_V1_0 = "sdxl_base_v1-0"
@@ -69,6 +70,55 @@ VAE_PARAMS_OUT_CH = 3
 VAE_PARAMS_CH = 128
 VAE_PARAMS_CH_MULT = [1, 2, 4, 4]
 VAE_PARAMS_NUM_RES_BLOCKS = 2
+
+UNET_KEY_PREFIX = "model.diffusion_model."
+TEXT_ENCODER_1_KEY_PREFIX = "conditioner.embedders.0.transformer."
+TEXT_ENCODER_2_KEY_PREFIX = "conditioner.embedders.1.model."
+VAE_KEY_PREFIX = "first_stage_model."
+
+TEXT_ENCODER_1_CONFIG = CLIPTextConfig(
+    vocab_size=49408,
+    hidden_size=768,
+    intermediate_size=3072,
+    num_hidden_layers=12,
+    num_attention_heads=12,
+    max_position_embeddings=77,
+    hidden_act="quick_gelu",
+    layer_norm_eps=1e-05,
+    dropout=0.0,
+    attention_dropout=0.0,
+    initializer_range=0.02,
+    initializer_factor=1.0,
+    pad_token_id=1,
+    bos_token_id=0,
+    eos_token_id=2,
+    model_type="clip_text_model",
+    projection_dim=768,
+    # torch_dtype="float32",
+    # transformers_version="4.25.0.dev0",
+)
+
+TEXT_ENCODER_2_CONFIG = CLIPTextConfig(
+    vocab_size=49408,
+    hidden_size=1280,
+    intermediate_size=5120,
+    num_hidden_layers=32,
+    num_attention_heads=20,
+    max_position_embeddings=77,
+    hidden_act="gelu",
+    layer_norm_eps=1e-05,
+    dropout=0.0,
+    attention_dropout=0.0,
+    initializer_range=0.02,
+    initializer_factor=1.0,
+    pad_token_id=1,
+    bos_token_id=0,
+    eos_token_id=2,
+    model_type="clip_text_model",
+    projection_dim=1280,
+    # torch_dtype="float32",
+    # transformers_version="4.25.0.dev0",
+)
 
 logger = log_utils.get_logger("model")
 
@@ -167,131 +217,211 @@ def _load_state_dict_on_device(model, state_dict, device, dtype=None):
     raise RuntimeError("Error(s) in loading state_dict for {}:\n\t{}".format(model.__class__.__name__, "\n\t".join(error_msgs)))
 
 
-def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dtype=None):
-    # model_version is reserved for future use
-    # dtype is used for full_fp16/bf16 integration. Text Encoder will remain fp32, because it runs on CPU when caching
+# def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dtype=None):
+#     # model_version is reserved for future use
+#     # dtype is used for full_fp16/bf16 integration. Text Encoder will remain fp32, because it runs on CPU when caching
 
-    # Load the state dict
-    if model_utils.is_safetensors(ckpt_path):
-        checkpoint = None
-        try:
-            state_dict = load_file(ckpt_path, device=map_location)
-        except:
-            state_dict = load_file(ckpt_path)  # prevent device invalid Error
-        epoch = None
-        global_step = None
-    else:
-        checkpoint = torch.load(ckpt_path, map_location=map_location)
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-            epoch = checkpoint.get("epoch", 0)
-            global_step = checkpoint.get("global_step", 0)
-        else:
-            state_dict = checkpoint
-            epoch = 0
-            global_step = 0
-        checkpoint = None
+#     # Load the state dict
+#     if model_utils.is_safetensors(ckpt_path):
+#         checkpoint = None
+#         try:
+#             state_dict = load_file(ckpt_path, device=map_location)
+#         except:
+#             state_dict = load_file(ckpt_path)  # prevent device invalid Error
+#         epoch = None
+#         global_step = None
+#     else:
+#         checkpoint = torch.load(ckpt_path, map_location=map_location)
+#         if "state_dict" in checkpoint:
+#             state_dict = checkpoint["state_dict"]
+#             epoch = checkpoint.get("epoch", 0)
+#             global_step = checkpoint.get("global_step", 0)
+#         else:
+#             state_dict = checkpoint
+#             epoch = 0
+#             global_step = 0
+#         checkpoint = None
 
-    # U-Net
-    logger.print("building U-Net")
-    with init_empty_weights():
-        unet = sdxl_original_unet.SdxlUNet2DConditionModel()
+#     # U-Net
+#     logger.print("building U-Net")
+#     with init_empty_weights():
+#         unet = sdxl_original_unet.SdxlUNet2DConditionModel()
 
-    logger.print("loading U-Net from checkpoint")
-    unet_sd = {}
-    for k in list(state_dict.keys()):
-        if k.startswith("model.diffusion_model."):
-            unet_sd[k.replace("model.diffusion_model.", "")] = state_dict.pop(k)
-    info = _load_state_dict_on_device(unet, unet_sd, device=map_location, dtype=dtype)
-    logger.print("U-Net: ", info)
+#     logger.print("loading U-Net from checkpoint")
+#     unet_sd = {}
+#     for k in list(state_dict.keys()):
+#         if k.startswith("model.diffusion_model."):
+#             unet_sd[k.replace("model.diffusion_model.", "")] = state_dict.pop(k)
+#     info = _load_state_dict_on_device(unet, unet_sd, device=map_location, dtype=dtype)
+#     logger.print("U-Net: ", info)
 
-    # Text Encoders
-    logger.print("building text encoders")
+#     # Text Encoders
+#     logger.print("building text encoders")
 
-    # Text Encoder 1 is same to Stability AI's SDXL
-    text_model1_cfg = CLIPTextConfig(
-        vocab_size=49408,
-        hidden_size=768,
-        intermediate_size=3072,
-        num_hidden_layers=12,
-        num_attention_heads=12,
-        max_position_embeddings=77,
-        hidden_act="quick_gelu",
-        layer_norm_eps=1e-05,
-        dropout=0.0,
-        attention_dropout=0.0,
-        initializer_range=0.02,
-        initializer_factor=1.0,
-        pad_token_id=1,
-        bos_token_id=0,
-        eos_token_id=2,
-        model_type="clip_text_model",
-        projection_dim=768,
-        # torch_dtype="float32",
-        # transformers_version="4.25.0.dev0",
-    )
-    with init_empty_weights():
-        text_model1 = CLIPTextModel._from_config(text_model1_cfg)
+#     # Text Encoder 1 is same to Stability AI's SDXL
+#     text_model1_cfg = CLIPTextConfig(
+#         vocab_size=49408,
+#         hidden_size=768,
+#         intermediate_size=3072,
+#         num_hidden_layers=12,
+#         num_attention_heads=12,
+#         max_position_embeddings=77,
+#         hidden_act="quick_gelu",
+#         layer_norm_eps=1e-05,
+#         dropout=0.0,
+#         attention_dropout=0.0,
+#         initializer_range=0.02,
+#         initializer_factor=1.0,
+#         pad_token_id=1,
+#         bos_token_id=0,
+#         eos_token_id=2,
+#         model_type="clip_text_model",
+#         projection_dim=768,
+#         # torch_dtype="float32",
+#         # transformers_version="4.25.0.dev0",
+#     )
+#     with init_empty_weights():
+#         text_model1 = CLIPTextModel._from_config(text_model1_cfg)
 
-    # Text Encoder 2 is different from Stability AI's SDXL. SDXL uses open clip, but we use the model from HuggingFace.
-    # Note: Tokenizer from HuggingFace is different from SDXL. We must use open clip's tokenizer.
-    text_model2_cfg = CLIPTextConfig(
-        vocab_size=49408,
-        hidden_size=1280,
-        intermediate_size=5120,
-        num_hidden_layers=32,
-        num_attention_heads=20,
-        max_position_embeddings=77,
-        hidden_act="gelu",
-        layer_norm_eps=1e-05,
-        dropout=0.0,
-        attention_dropout=0.0,
-        initializer_range=0.02,
-        initializer_factor=1.0,
-        pad_token_id=1,
-        bos_token_id=0,
-        eos_token_id=2,
-        model_type="clip_text_model",
-        projection_dim=1280,
-        # torch_dtype="float32",
-        # transformers_version="4.25.0.dev0",
-    )
-    with init_empty_weights():
-        text_model2 = CLIPTextModelWithProjection(text_model2_cfg)
+#     # Text Encoder 2 is different from Stability AI's SDXL. SDXL uses open clip, but we use the model from HuggingFace.
+#     # Note: Tokenizer from HuggingFace is different from SDXL. We must use open clip's tokenizer.
+#     text_model2_cfg = CLIPTextConfig(
+#         vocab_size=49408,
+#         hidden_size=1280,
+#         intermediate_size=5120,
+#         num_hidden_layers=32,
+#         num_attention_heads=20,
+#         max_position_embeddings=77,
+#         hidden_act="gelu",
+#         layer_norm_eps=1e-05,
+#         dropout=0.0,
+#         attention_dropout=0.0,
+#         initializer_range=0.02,
+#         initializer_factor=1.0,
+#         pad_token_id=1,
+#         bos_token_id=0,
+#         eos_token_id=2,
+#         model_type="clip_text_model",
+#         projection_dim=1280,
+#         # torch_dtype="float32",
+#         # transformers_version="4.25.0.dev0",
+#     )
+#     with init_empty_weights():
+#         text_model2 = CLIPTextModelWithProjection(text_model2_cfg)
 
-    logger.print("loading text encoders from checkpoint")
-    te1_sd = {}
-    te2_sd = {}
-    for k in list(state_dict.keys()):
-        if k.startswith("conditioner.embedders.0.transformer."):
-            te1_sd[k.replace("conditioner.embedders.0.transformer.", "")] = state_dict.pop(k)
-        elif k.startswith("conditioner.embedders.1.model."):
-            te2_sd[k] = state_dict.pop(k)
+#     logger.print("loading text encoders from checkpoint")
+#     te1_sd = {}
+#     te2_sd = {}
+#     for k in list(state_dict.keys()):
+#         if k.startswith("conditioner.embedders.0.transformer."):
+#             te1_sd[k.replace("conditioner.embedders.0.transformer.", "")] = state_dict.pop(k)
+#         elif k.startswith("conditioner.embedders.1.model."):
+#             te2_sd[k] = state_dict.pop(k)
 
-    # 一部のposition_idsがないモデルへの対応 / add position_ids for some models
-    if "text_model.embeddings.position_ids" not in te1_sd:
-        te1_sd["text_model.embeddings.position_ids"] = torch.arange(77).unsqueeze(0)
+#     # 一部のposition_idsがないモデルへの対応 / add position_ids for some models
+#     if "text_model.embeddings.position_ids" not in te1_sd:
+#         te1_sd["text_model.embeddings.position_ids"] = torch.arange(77).unsqueeze(0)
 
-    info1 = _load_state_dict_on_device(text_model1, te1_sd, device=map_location)  # remain fp32
-    logger.print("text encoder 1:", info1)
+#     info1 = _load_state_dict_on_device(text_model1, te1_sd, device=map_location)  # remain fp32
+#     logger.print("text encoder 1:", info1)
 
-    converted_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(te2_sd, max_length=77)
-    info2 = _load_state_dict_on_device(text_model2, converted_sd, device=map_location)  # remain fp32
-    logger.print("text encoder 2:", info2)
+#     converted_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(te2_sd, max_length=77)
+#     info2 = _load_state_dict_on_device(text_model2, converted_sd, device=map_location)  # remain fp32
+#     logger.print("text encoder 2:", info2)
 
-    # prepare vae
-    logger.print("building VAE")
+#     # prepare vae
+#     logger.print("building VAE")
+#     vae_config = model_utils.create_vae_diffusers_config()
+#     with init_empty_weights():
+#         vae = AutoencoderKL(**vae_config)
+
+#     logger.print("loading VAE from checkpoint")
+#     converted_vae_checkpoint = model_utils.convert_ldm_vae_checkpoint(state_dict, vae_config)
+#     info = _load_state_dict_on_device(vae, converted_vae_checkpoint, device=map_location, dtype=dtype)
+#     logger.print("VAE:", info)
+
+#     ckpt_info = (epoch, global_step) if epoch is not None else None
+#     return text_model1, text_model2, vae, unet, logit_scale, ckpt_info
+
+def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_class=SdxlUNet2DConditionModel):
     vae_config = model_utils.create_vae_diffusers_config()
     with init_empty_weights():
+        unet = nnet_class()
+        text_encoder1 = CLIPTextModel._from_config(TEXT_ENCODER_1_CONFIG)
+        text_encoder2 = CLIPTextModelWithProjection(TEXT_ENCODER_2_CONFIG)
         vae = AutoencoderKL(**vae_config)
+    unet_sd = {}
+    text_encoder1_sd = {}
+    text_encoder2_sd = {}
+    vae_sd = {}
+    for k, v in state_dict.items():
+        if k.startswith(UNET_KEY_PREFIX):
+            unet_sd[k[len(UNET_KEY_PREFIX):]] = v
+        elif k.startswith(TEXT_ENCODER_1_KEY_PREFIX):
+            text_encoder1_sd[k[len(TEXT_ENCODER_1_KEY_PREFIX):]] = v
+        elif k.startswith(TEXT_ENCODER_2_KEY_PREFIX):
+            text_encoder2_sd[k] = v
+        elif k.startswith(VAE_KEY_PREFIX):
+            vae_sd[k] = v
+    text_encoder2_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(text_encoder2_sd, max_length=77)
+    vae_sd = model_utils.convert_ldm_vae_checkpoint(vae_sd, vae_config)
 
-    logger.print("loading VAE from checkpoint")
-    converted_vae_checkpoint = model_utils.convert_ldm_vae_checkpoint(state_dict, vae_config)
-    info = _load_state_dict_on_device(vae, converted_vae_checkpoint, device=map_location, dtype=dtype)
-    logger.print("VAE:", info)
+    _load_state_dict_on_device(unet, unet_sd, device=device, dtype=dtype)
+    _load_state_dict_on_device(text_encoder1, text_encoder1_sd, device=device)
+    _load_state_dict_on_device(text_encoder2, text_encoder2_sd, device=device)
+    _load_state_dict_on_device(vae, vae_sd, device=device, dtype=dtype)
 
-    ckpt_info = (epoch, global_step) if epoch is not None else None
-    return text_model1, text_model2, vae, unet, logit_scale, ckpt_info
+    return {'nnet': unet, 'text_encoder1': text_encoder1, 'text_encoder2': text_encoder2, 'vae': vae, 'logit_scale': logit_scale}
+
+
+def load_models_from_sdxl_checkpoint(ckpt_path, device='cpu', dtype=None, unet_class=SdxlUNet2DConditionModel):
+    r"""
+    Load SDXL components from a local checkpoint file.
+    """
+    if model_utils.is_safetensors(ckpt_path):
+        state_dict = load_file(ckpt_path)
+        ckpt_info = None
+    else:
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        epoch = checkpoint.get("epoch", 0)
+        global_step = checkpoint.get("global_step", 0)
+        ckpt_info = (epoch, global_step)
+
+    models = load_models_from_sdxl_state_dict(state_dict, device=device, dtype=dtype, nnet_class=unet_class)
+    models['ckpt_info'] = ckpt_info
+    return models
+
+
+def load_models_from_sdxl_diffusers_state(version, device='cpu', dtype=None, variant=None, nnet_class=SdxlUNet2DConditionModel, cache_dir=None, token=None, max_retries=None):
+    r"""
+    Load SDXL components from a hf or local diffusers checkpoint.
+    """
+    logger.print(f"load diffusers pretrained models: {version}")
+    from diffusers import StableDiffusionXLPipeline
+    retries = 0
+    while True:
+        try:
+            pipe = StableDiffusionXLPipeline.from_pretrained(
+                version, torch_dtype=dtype, variant=variant, tokenizer=None, cache_dir=cache_dir, token=token,
+            )
+            break
+        except model_utils.NETWORK_EXCEPTIONS:
+            logger.print(log_utils.yellow(f"Connection error when downloading model `{version}` from HuggingFace. Retrying..."))
+            if max_retries is not None and retries >= max_retries:
+                raise
+            retries += 1
+            continue
+        except ValueError:
+            logger.print(log_utils.yellow(f"Model `{version}` not found on HuggingFace. Use default variant instead."))
+            variant = None
+            continue
+    unet, text_encoder1, text_encoder2, vae = pipe.unet, pipe.text_encoder, pipe.text_encoder_2, pipe.vae
+    unet_sd = convert_diffusers_unet_state_dict_to_sdxl(unet.state_dict())
+    with init_empty_weights():
+        unet = nnet_class()  # overwrite unet
+    _load_state_dict_on_device(unet, unet_sd, device=device, dtype=dtype)
+    return {'nnet': unet, 'text_encoder1': text_encoder1, 'text_encoder2': text_encoder2, 'vae': vae, 'logit_scale': None, 'ckpt_info': None}
 
 
 def make_unet_conversion_map():
@@ -474,26 +604,21 @@ def convert_text_encoder_2_state_dict_to_sdxl(checkpoint, logit_scale):
     return new_sd
 
 
-def save_stable_diffusion_checkpoint(
-    fp,
+def convert_models_to_sdxl_state_dict(
     text_encoder1,
     text_encoder2,
     unet,
-    epochs,
-    steps,
-    ckpt_info,
     vae,
     logit_scale,
-    save_dtype=None,
+    dtype=None,
 ):
-    os.makedirs(os.path.dirname(fp), exist_ok=True)
     state_dict = {}
 
     def update_sd(prefix, sd):
         for k, v in sd.items():
             key = prefix + k
-            if save_dtype is not None:
-                v = v.detach().clone().to("cpu").to(save_dtype)
+            if dtype is not None:
+                v = v.detach().clone().to("cpu").to(dtype)
             state_dict[key] = v
 
     # Convert the UNet model
@@ -509,56 +634,58 @@ def save_stable_diffusion_checkpoint(
     vae_dict = model_utils.convert_vae_state_dict(vae.state_dict())
     update_sd("first_stage_model.", vae_dict)
 
+    return state_dict
+
+
+def save_stable_diffusion_checkpoint(
+    output_file,
+    text_encoder,
+    unet,
+    epochs,
+    steps,
+    ckpt_info,
+    vae,
+    logit_scale,
+    save_dtype=None,
+):
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    state_dict = convert_models_to_sdxl_state_dict(
+        text_encoder[0],
+        text_encoder[1],
+        unet,
+        vae,
+        logit_scale,
+        dtype=save_dtype,
+    )
+
     # Put together new checkpoint
     key_count = len(state_dict.keys())
-    new_ckpt = {"state_dict": state_dict}
 
-    # epoch and global_step are sometimes not int
-    if ckpt_info is not None:
-        epochs += ckpt_info[0]
-        steps += ckpt_info[1]
-
-    new_ckpt["epoch"] = epochs
-    new_ckpt["global_step"] = steps
-
-    if model_utils.is_safetensors(fp):
-        save_file(state_dict, fp)
+    if model_utils.is_safetensors(output_file):
+        save_file(state_dict, output_file)
     else:
-        torch.save(new_ckpt, fp)
+        new_ckpt = {"state_dict": state_dict}
+
+        # epoch and global_step are sometimes not int
+        if ckpt_info is not None:
+            epochs += ckpt_info[0]
+            steps += ckpt_info[1]
+
+        new_ckpt["epoch"] = epochs
+        new_ckpt["global_step"] = steps
+        torch.save(new_ckpt, output_file)
 
     return key_count
 
 
-def save_train_state(
-    fp: str,
-    optimizer,
-    lr_scheduler,
-    epochs: int,
-    steps: int,
-):
-    os.makedirs(os.path.dirname(fp), exist_ok=True)
-    state_dict = {
-        "optimizer": optimizer.state_dict(),
-        "lr_scheduler": lr_scheduler.state_dict(),
-        "epoch": epochs,
-        "step": steps,
-    }
-    torch.save(state_dict, fp)
-
-
-def load_train_state(
-    fp: str,
-    optimizer,
-    lr_scheduler,
-):
-    state_dict = torch.load(fp)
-    optimizer.load_state_dict(state_dict["optimizer"])
-    lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
-    return state_dict["epoch"], state_dict["step"]
-
-
 def save_diffusers_checkpoint(
-    output_dir, text_encoder1, text_encoder2, unet, pretrained_model_name_or_path, vae=None, use_safetensors=False, save_dtype=None
+    output_dir,
+    text_encoders,
+    unet,
+    pretrained_model_name_or_path,
+    vae=None,
+    use_safetensors=False,
+    save_dtype=None,
 ):
     from diffusers import StableDiffusionXLPipeline
 
@@ -576,8 +703,10 @@ def save_diffusers_checkpoint(
         pretrained_model_name_or_path = DIFFUSERS_REF_MODEL_ID_SDXL
 
     scheduler = EulerDiscreteScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
-    tokenizer1 = CLIPTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder="tokenizer")
-    tokenizer2 = CLIPTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder="tokenizer_2")
+    tokenizers = [
+        CLIPTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder="tokenizer"),
+        CLIPTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder="tokenizer_2")
+    ]
     if vae is None:
         vae = AutoencoderKL.from_pretrained(pretrained_model_name_or_path, subfolder="vae")
 
@@ -587,22 +716,22 @@ def save_diffusers_checkpoint(
             model.config._name_or_path = None
             model.config._name_or_path = None
 
-    remove_name_or_path(diffusers_unet)
-    remove_name_or_path(text_encoder1)
-    remove_name_or_path(text_encoder2)
     remove_name_or_path(scheduler)
-    remove_name_or_path(tokenizer1)
-    remove_name_or_path(tokenizer2)
+    remove_name_or_path(diffusers_unet)
+    for text_encoder in text_encoders:
+        remove_name_or_path(text_encoder)
+    for tokenizer in tokenizers:
+        remove_name_or_path(tokenizer)
     remove_name_or_path(vae)
 
     pipeline = StableDiffusionXLPipeline(
         unet=diffusers_unet,
-        text_encoder=text_encoder1,
-        text_encoder_2=text_encoder2,
+        text_encoder=text_encoders[0],
+        text_encoder_2=text_encoders[1],
         vae=vae,
         scheduler=scheduler,
-        tokenizer=tokenizer1,
-        tokenizer_2=tokenizer2,
+        tokenizer=tokenizers[0],
+        tokenizer_2=tokenizers[1],
     )
     if save_dtype is not None:
         pipeline.to(None, save_dtype)

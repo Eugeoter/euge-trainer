@@ -161,14 +161,16 @@ cython_debug/
 
 # customs
 
-datasets/
-models/
-output/
-tokenizers/
-draft*
+/datasets/
+/models/
+/output/
+/tokenizers/
+/draft*
 wandb/
 *_dev*.py
 *_deprecated*.py
 *_test*.py
-.bak
+/.bak
 configs/my/
+*controlany*
+ui/

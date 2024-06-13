@@ -4,14 +4,15 @@ scipy
 aiofiles
 xformers==0.0.20
 torch==2.0.1
-torchvision==0.15.2
-transformers==4.30.2
-diffusers
+torchvision
+transformers>=4.41.2
+diffusers>=0.29.0
 safetensors
-accelerate
+accelerate>=0.31.0
 einops
 bitsandbytes==0.39.1
 tensorboard
 absl-py
 ml-collections
+git@github.com:Eugeoter/waifuset.git@dev
 # lion_pytorch

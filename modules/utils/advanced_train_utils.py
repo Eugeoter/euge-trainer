@@ -439,3 +439,10 @@ def apply_noise_offset(latents, noise, noise_offset, adaptive_noise_scale):
 
     noise = noise + noise_offset * torch.randn((latents.shape[0], latents.shape[1], 1, 1), device=latents.device)
     return noise
+
+
+def logit_normal(mu, sigma, shape, device):
+    z = torch.randn(*shape, device=device)
+    z = mu + sigma * z
+    t = torch.sigmoid(z)
+    return t

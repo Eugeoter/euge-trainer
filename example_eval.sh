@@ -1,1 +1,0 @@
-python sdxl_eval.py --config=configs/eval_config.py
