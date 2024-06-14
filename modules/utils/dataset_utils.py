@@ -5,7 +5,7 @@ import cv2
 import os
 import numpy as np
 import functools
-from PIL import Image
+from PIL import Image, ExifTags
 from typing import Tuple, Union, Literal
 from torchvision import transforms
 from waifuset.classes import DictDataset, DictData
@@ -25,18 +25,36 @@ def load_local_dataset(metadata_files, image_dirs, fp_key='image_path', recur=Tr
         exts=exts,
     )
     metaset_kwargs.update(kwargs)
-    metaset: DictDataset = functools.reduce(lambda x, y: x + y, [
-        DictDataset.from_dataset(AutoDataset(mdfile, **metaset_kwargs))
-        for mdfile in metadata_files
-    ])
-    if image_dirs:
-        dirset = functools.reduce(lambda x, y: x + y, [
+    if metadata_files:
+        metaset: DictDataset = functools.reduce(lambda x, y: x + y, [
+            DictDataset.from_dataset(AutoDataset(mdfile, **metaset_kwargs))
+            for mdfile in metadata_files
+        ])
+        if image_dirs:
+            dirset = functools.reduce(lambda x, y: x + y, [
+                DirectoryDataset.from_disk(source, **metaset_kwargs)
+                for source in image_dirs
+            ])
+            metaset.apply_map(mapping.redirect_columns, columns=[fp_key], tarset=dirset)
+        metaset = metaset.subset(lambda x: fp_key in x and os.path.exists(x[fp_key]))
+        metaset.apply_map(mapping.as_posix_path, columns=[fp_key])
+    elif image_dirs:
+        from waifuset.classes.data.data_utils import read_attrs
+        metaset = functools.reduce(lambda x, y: x + y, [
             DirectoryDataset.from_disk(source, **metaset_kwargs)
             for source in image_dirs
         ])
-        metaset.apply_map(mapping.redirect_columns, columns=[fp_key], tarset=dirset)
-    metaset = metaset.subset(lambda x: fp_key in x and os.path.exists(x[fp_key]))
-    metaset.apply_map(mapping.as_posix_path, columns=[fp_key])
+        metaset = DictDataset.from_dataset(metaset)
+
+        if fp_key == 'image_path':
+            def read_data_attr(img_md):
+                attrs = read_attrs(img_md[fp_key])
+                img_md.update(attrs)
+                return img_md
+            metaset.apply_map(read_data_attr)
+    else:
+        raise ValueError("metadata_files or image_dirs must be provided.")
+
     return metaset
 
 
@@ -68,6 +86,9 @@ class HuggingFaceData(DictData):
 
 
 def load_huggingface_dataset(name_or_path, cache_dir=None, split='train', primary_key='image_key', column_mapping=None, max_retries=None) -> DictDataset:
+    r"""
+    Load dataset from HuggingFace and convert it to DictDataset.
+    """
     import datasets
     retries = 0
     while True:
@@ -172,10 +193,40 @@ def convert_to_rgb(image, bg_color=(255, 255, 255)):
         return image[:, :, :3]
 
 
-def resize_if_needed(image, target_size):
-    if image.shape[0] != target_size[1] or image.shape[1] != target_size[0]:
-        image = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
+def resize_if_needed(image: Union[Image.Image, np.ndarray], target_size):
+    if isinstance(image, Image.Image):
+        if image.size[0] != target_size[0] or image.size[1] != target_size[1]:
+            image = image.resize(target_size, Image.Resampling.LANCZOS)
+    elif isinstance(image, np.ndarray):
+        if image.shape[0] != target_size[1] or image.shape[1] != target_size[0]:
+            image = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
     return image
+
+
+def crop_if_needed(image: Union[Image.Image, np.ndarray], target_size, max_ar=None):
+    image_size = image.size if isinstance(image, Image.Image) else image.shape[:2]
+    if max_ar is not None and (ar_diff := aspect_ratio_diff(image_size, target_size)) >= max_ar:
+        img_w, img_h = image_size
+        tar_w, tar_h = target_size
+        ar_image = img_w / img_h
+        ar_target = tar_w / tar_h
+        if ar_image < ar_target:
+            ar_new = ar_target / max_ar
+            new_img_w = img_w
+            new_img_h = img_w / ar_new
+        else:
+            ar_new = ar_target * max_ar
+            new_img_w = img_h * ar_new
+            new_img_h = img_h
+        left = int((new_img_w - img_w) / 2)
+        top = int((new_img_h - img_h) / 2)
+        right = int((new_img_w + img_w) / 2)
+        bottom = int((new_img_h + img_h) / 2)
+        crop_ltrb = (left, top, right, bottom)
+        image = image.crop(crop_ltrb) if isinstance(image, Image.Image) else image[top:bottom, left:right]
+    else:
+        crop_ltrb = (0, 0, image_size[0], image_size[1])
+    return image, crop_ltrb
 
 
 def convert_size_if_needed(size: Union[str, Tuple[int, int]]):
@@ -192,9 +243,25 @@ IMAGE_TRANSFORMS = transforms.Compose(
 )
 
 
-def process_image(image, target_size):
-    image = resize_if_needed(image, target_size)
-    image = IMAGE_TRANSFORMS(image)
+def aspect_ratio_diff(size_1: Tuple[int, int], size_2: Tuple[int, int]):
+    ar_1 = size_1[0] / size_1[1]
+    ar_2 = size_2[0] / size_2[1]
+    return max(ar_1/ar_2, ar_2/ar_1)
+
+
+def rotate_image_straight(image: Image) -> Image:
+    exif: Image.Exif = image.getexif()
+    if exif:
+        orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}[
+            'Orientation']
+        orientation = exif.get(orientation_tag)
+        degree = {
+            3: 180,
+            6: 270,
+            8: 90,
+        }.get(orientation)
+        if degree:
+            image = image.rotate(degree, expand=True)
     return image
 
 

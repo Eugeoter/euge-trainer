@@ -9,7 +9,7 @@
 | **metadata_files**                | 元数据文件路径列表         | list     | 是       |                                                                                              |
 | **output_dir**                    | 项目输出文件夹路径         | str      | 是       |                                                                                              |
 | resume_from                       | 恢复训练路径               | str      | 否       | 指向一个保存训练状态的文件夹                                                                 |
-| vae                               | VAE 模型路径               | str      | 否       | 指向一个 safetensors 的 vae 模型文件。将覆盖大模型自带的 vae。                               |
+| vae_model_name_or_path            | VAE 模型路径               | str      | 否       | 指向一个 safetensors 的 vae 模型文件。将覆盖大模型自带的 vae。                               |
 | no_half_vae                       | 不使用半精度训练 VAE       | bool     | 否       | 见[VAE 精度](#vae-精度)                                                                      |
 | tokenizer_cache_dir               | 分词器缓存路径             | str      | 否       |                                                                                              |
 | flip_aug                          | 是否使用水平翻转数据增强   | bool     | 否       | 启用时，训练图像会随机水平翻转。但缓存潜变量的时长和大小也会加倍。                           |
@@ -42,6 +42,7 @@
 | full_bf16                         | 全 bf16 精度               | bool     | 否       | 启用时，以显存换精度。开启后，文本编码器将变为 bf16 精度。                                   |
 | full_fp16                         | 全 fp16 精度               | bool     | 否       | 启用时，以显存换精度。开启后，文本编码器将变为 fp16 精度。                                   |
 | train_text_encoder                | 训练文本编码器             | bool     | 否       |                                                                                              |
+| learning_rate_te                  | 文本编码器的学习率         | float    | 否       |                                                                                              |
 | learning_rate_te1                 | 文本编码器 1 学习率        | float    | 否       |                                                                                              |
 | learning_rate_te2                 | 文本编码器 2 学习率        | float    | 否       |                                                                                              |
 | gradient_checkpointing            | 梯度检查点                 | bool     | 否       | 启用时，以时间换显存。                                                                       |

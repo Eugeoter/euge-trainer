@@ -374,7 +374,7 @@ def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_
     return {'nnet': unet, 'text_encoder1': text_encoder1, 'text_encoder2': text_encoder2, 'vae': vae, 'logit_scale': logit_scale}
 
 
-def load_models_from_sdxl_checkpoint(ckpt_path, device='cpu', dtype=None, unet_class=SdxlUNet2DConditionModel):
+def load_models_from_sdxl_checkpoint(ckpt_path, device='cpu', dtype=None, nnet_class=SdxlUNet2DConditionModel):
     r"""
     Load SDXL components from a local checkpoint file.
     """
@@ -388,7 +388,7 @@ def load_models_from_sdxl_checkpoint(ckpt_path, device='cpu', dtype=None, unet_c
         global_step = checkpoint.get("global_step", 0)
         ckpt_info = (epoch, global_step)
 
-    models = load_models_from_sdxl_state_dict(state_dict, device=device, dtype=dtype, nnet_class=unet_class)
+    models = load_models_from_sdxl_state_dict(state_dict, device=device, dtype=dtype, nnet_class=nnet_class)
     models['ckpt_info'] = ckpt_info
     return models
 

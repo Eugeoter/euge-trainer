@@ -14,7 +14,7 @@ class SDXLTrainDataset(T2ITrainDataset):
             img_md = self.data[img_key]
             original_size = img_md['original_size'] or img_md['image_size']
             target_size = img_md['bucket_size']
-            crop_ltrb = img_md.get('crop_ltrb') or (0, 0, 0, 0)  # ! temporary set to 0: no crop at all
+            crop_ltrb = img_md.get('crop_ltrb') or (0, 0, target_size[0], target_size[1])
             is_flipped = samples["is_flipped"][i]
             if not is_flipped:
                 crop_left_top = (crop_ltrb[0], crop_ltrb[1])

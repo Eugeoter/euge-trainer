@@ -7,7 +7,7 @@
 在 kohya-ss 的基础上，对训练脚本进行了优化，主要包括：
 
 1. **重写了数据集类**：
-   a. 实现了数据库读取，从 json 文件中读取需要的所有参数；
+   a. 实现了数据库读取，从 json/csv/sqlite3 文件中读取需要的所有参数；
    b. 实现了多 GPU 并行缓存潜变量；
    c. 实现了异步潜变量缓存写入，通过异步 IO 来提高缓存潜变量时的 GPU 利用率，从而加速缓存；
    d. 实现了缓存文件有效性检查；
@@ -23,16 +23,6 @@
 # 使用方法
 
 ## 安装
-
-```bash
-git clone https://github.com/Eugeoter/euge-trainer.git
-cd euge-trainer
-pip install -r requirements.txt
-```
-
-### Dev 版本安装（可选）
-
-Dev 版本支持 SD1.5、SDXL 和 SD3 的训练，但可能不稳定。
 
 ```bash
 git clone https://github.com/Eugeoter/euge-trainer.git
@@ -87,13 +77,15 @@ pip install -r requirements.txt
 
 ##### 元数据文件
 
-元数据文件是一个 json 文件，包含了一些数据的各种信息，如图像路径、标注、图像尺寸、美学评分等。训练时，可以用一个或多个元数据文件来描述数据集。
+元数据文件是一个 json, csv 或 sqlite3 文件，包含了一些数据的各种信息，如图像路径、标注、图像尺寸、美学评分等。训练时，可以用一个或多个元数据文件来描述数据集。
 
 使用元数据文件替代传统 txt 标注能简化数据集管理，不再需要为每个图像文件创建一个 txt 文件作为标注。其能够存储更多种类的数据信息。
 
 制作元数据文件可使用 [Waifuset](https://github.com/Eugeoter/waifuset) 项目的 dev 分支。是时候摆脱 txt 标注文件了。
 
-元数据 json 文件格式如下：
+元数据文件格式：
+
+**JSON**
 
 ```json
 {
@@ -111,14 +103,32 @@ pip install -r requirements.txt
 }
 ```
 
-##### c. 图像 + 元数据 json 文件：
+**CSV**
+
+```csv
+image_path,caption
+.../image1.jpg,1girl, solo, ...
+.../image2.jpg,1girl, solo, ...
+...
+```
+
+**SQL**
+
+```sql
+CREATE TABLE images (
+  image_path TEXT PRIMARY KEY,
+  caption TEXT
+);
+```
+
+##### c. 图像 + 元数据文件：
 
 ```
   image_dir
   ├── image1.jpg
   ├── image2.jpg
   ├── ...
-  metadata.json
+  metadata.json / metadata.csv / metadata.sqlite3
 ```
 
 ##### d. 缓存潜变量 + 元数据 json 文件：
@@ -128,12 +138,12 @@ pip install -r requirements.txt
   ├── image1.npz
   ├── image2.npz
   ├── ...
-  metadata.json
+  metadata.json / metadata.csv / metadata.sqlite3
 ```
 
 #### HuggingFace 数据集
 
-您可以使用 HuggingFace 数据集。当 `metadata_files` 和 `image_dirs` 为空时，训练器会尝试从 `dataset_name_or_path` 指定的 HuggingFace 数据集中加载数据。
+您可以使用 HuggingFace 数据集。当 `metadata_files` 和 `image_dirs` 为空时，训练器会尝试从 `dataset_name_or_path` 指定的 HuggingFace 数据集中加载数据，所加载数据的 `image` 列和 `caption` 列将被用作图像和标注。
 图像列由参数 `dataset_image_column` 指定，标注列由参数 `dataset_caption_column` 指定。
 
 ### 配置参数

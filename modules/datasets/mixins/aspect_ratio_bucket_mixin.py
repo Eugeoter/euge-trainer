@@ -1,6 +1,5 @@
 import math
 import random
-from PIL import Image, ExifTags
 from typing import List, Dict, Optional, Tuple, Union
 from ...utils import log_utils, dataset_utils
 
@@ -23,6 +22,8 @@ class AspectRatioBucketMixin(object):
     arb: bool = True
     max_aspect_ratio: float = 1.1
     bucket_reso_step: int = 32
+    max_width: Optional[int] = None
+    max_height: Optional[int] = None
     predefined_buckets: Optional[List[Tuple[int, int]]] = []
 
     def get_resolution(self):
@@ -35,12 +36,13 @@ class AspectRatioBucketMixin(object):
             return bucket_size
         elif image_size is not None or (image_size := img_md.get('image_size')) is not None:
             image_size = dataset_utils.convert_size_if_needed(image_size)
-            bucket_size = get_bucket_reso(
+            bucket_size = get_bucket_size(
                 image_size,
                 self.resolution,
-                max_aspect_ratio=self.max_aspect_ratio,
                 divisible=self.bucket_reso_step,
                 buckets=self.predefined_buckets,
+                max_width=self.max_width,
+                max_height=self.max_height,
             )
             return bucket_size
         else:
@@ -68,7 +70,7 @@ class AspectRatioBucketMixin(object):
         return buckets
 
 
-def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Optional[int] = None) -> Tuple[int, int]:
+def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Optional[int] = None, max_width=None, max_height=None) -> Tuple[int, int]:
     r"""
     w*h = reso*reso
     w/h = img_w/img_h
@@ -79,32 +81,17 @@ def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Opti
     reso = reso if isinstance(reso, tuple) else (reso, reso)
     divisible = divisible or 1
     img_ar = img_w / img_h
-    around_h = int(math.sqrt(reso[0]*reso[1] /
-                   img_ar) // divisible * divisible)
-    around_w = int(img_ar * around_h // divisible * divisible)
+    around_h = math.sqrt(reso[0]*reso[1] / img_ar)
+    around_w = img_ar * around_h // divisible * divisible
+    if max_width and around_w > max_width:
+        around_h = around_h * max_width // around_w
+        around_w = max_width
+    elif max_height and around_h > max_height:
+        around_w = around_w * max_height // around_h
+        around_h = max_height
+    around_h = int(around_h // divisible * divisible)
+    around_w = int(around_w // divisible * divisible)
     return (around_w, around_h)
-
-
-def aspect_ratio_diff(size_1: Tuple[int, int], size_2: Tuple[int, int]):
-    ar_1 = size_1[0] / size_1[1]
-    ar_2 = size_2[0] / size_2[1]
-    return max(ar_1/ar_2, ar_2/ar_1)
-
-
-def rotate_image_straight(image: Image) -> Image:
-    exif: Image.Exif = image.getexif()
-    if exif:
-        orientation_tag = {v: k for k, v in ExifTags.TAGS.items()}[
-            'Orientation']
-        orientation = exif.get(orientation_tag)
-        degree = {
-            3: 180,
-            6: 270,
-            8: 90,
-        }.get(orientation)
-        if degree:
-            image = image.rotate(degree, expand=True)
-    return image
 
 
 def closest_resolution(buckets: List[Tuple[int, int]], size: Tuple[int, int]) -> Tuple[int, int]:
@@ -116,12 +103,14 @@ def closest_resolution(buckets: List[Tuple[int, int]], size: Tuple[int, int]) ->
     return min(buckets, key=distance)
 
 
-def get_bucket_reso(
+def get_bucket_size(
     image_size: Tuple[int, int],
     max_resolution: Optional[Union[Tuple[int, int], int]] = 1024,
-    max_aspect_ratio: Optional[float] = 1.1,
+    max_width: Optional[int] = None,
+    max_height: Optional[int] = None,
     divisible: Optional[int] = 32,
     buckets: Optional[List[Tuple[int, int]]] = None,
+    allow_upscale: bool = False,
 ):
     r"""
     Get the closest resolution to the image's resolution from the buckets. If the image's aspect ratio is too
@@ -142,21 +131,10 @@ def get_bucket_reso(
             "Either `buckets` or `max_resolution` must be provided.")
 
     img_w, img_h = image_size
-    clo_reso = closest_resolution(buckets, image_size) if buckets else around_reso(
-        img_w, img_h, reso=max_resolution, divisible=divisible)
+    bucket_w, bucket_h = closest_resolution(buckets, image_size) if buckets else around_reso(img_w, img_h, reso=max_resolution, divisible=divisible, max_width=max_width, max_height=max_height)
     max_resolution = max(buckets, key=lambda x: x[0]*x[1]) if buckets and max_resolution == -1 else max_resolution
-
-    # Handle special resolutions
-    if img_w < clo_reso[0] or img_h < clo_reso[1]:
-        new_w = img_w // divisible * divisible
-        new_h = img_h // divisible * divisible
-        clo_reso = (new_w, new_h)
-    elif max_aspect_ratio and aspect_ratio_diff((img_w, img_h), clo_reso) >= max_aspect_ratio:
-        if buckets and max_resolution:
-            clo_reso = around_reso(
-                img_w, img_h, reso=max_resolution, divisible=divisible)
-        else:
-            log_utils.warn(
-                f"An image has aspect ratio {img_w/img_h:.2f} which is too different from the closest resolution {clo_reso[0]/clo_reso[1]}. You may lower the `divisible` to avoid this.")
-
-    return clo_reso
+    if not allow_upscale and (img_w < bucket_w or img_h < bucket_h):
+        bucket_w = img_w // divisible * divisible
+        bucket_h = img_h // divisible * divisible
+    bucket_size = (bucket_w, bucket_h)
+    return bucket_size

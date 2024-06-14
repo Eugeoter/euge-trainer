@@ -5,6 +5,7 @@ import gc
 from argparse import Namespace
 from diffusers.utils.torch_utils import is_compiled_module
 from accelerate import Accelerator
+from typing import Literal
 from ..utils import log_utils, class_utils, model_utils, eval_utils
 
 logger = log_utils.get_logger("train")
@@ -18,21 +19,50 @@ class TrainState(class_utils.FromConfigMixin):
     lr_scheduler: torch.optim.lr_scheduler._LRScheduler
     train_dataloader: torch.utils.data.DataLoader
     models: dict
+    save_dtype: torch.dtype
 
     batch_size: int
     gradient_accumulation_steps: int
     num_train_epochs: int
-    save_every_n_steps: int
-    save_every_n_epochs: int
-    sample_every_n_steps: int
-    sample_every_n_epochs: int
-    save_model: bool
-    save_train_state: bool
+
+    save_model: bool = True
+    save_train_state: bool = True
+    save_every_n_steps: int = None
+    save_every_n_epochs: int = 1
+    save_on_train_end: bool = True
+    save_on_keyboard_interrupt: bool = False
+    save_on_exception: bool = False
+
+    sample_benchmark: str = None
+    sample_every_n_steps: int = None
+    sample_every_n_epochs: int = 1
+    sample_sampler: str = 'euler_a'
+    sample_params = class_utils.cfg(
+        prompt="1girl, solo, cowboy shot, white background, smile, looking at viewer, serafuku, pleated skirt",
+        negative_prompt="abstract, bad anatomy, clumsy pose, signature",
+        steps=28,
+        batch_size=1,
+        batch_count=4,
+        scale=7.5,
+        seed=42,
+        width=832,
+        height=1216,
+        save_latents=False,
+    )
+
     output_dir: str
-    output_subdir: Namespace
-    output_name: Namespace
-    save_precision: str
-    resume_from: str
+    output_subdir = class_utils.cfg(
+        models='models',
+        train_state='train_state',
+        samples='samples',
+        logs='logs',
+    )
+    output_name = class_utils.cfg(
+        models=None,
+        train_state=None,
+    )
+    save_precision: Literal['fp16', 'bf16', 'float'] = 'fp16'
+    resume_from: str = None
 
     @classmethod
     def from_config(

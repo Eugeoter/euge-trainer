@@ -46,7 +46,7 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
         if not self.arb:
             self.logger.print(f"bucket_size: {self.get_resolution()}")
         else:
-            self.logger.print(f"buckets: {list(self.buckets.keys())}")
+            self.logger.print(f"buckets: {list(sorted(self.buckets.keys(), key=lambda x: x[0] * x[1]))}")
         self.logger.print(f"num_buckets: {len(self.buckets)}")
         self.batches = self.make_batches()
         self.logger.print(f"num_batches: {len(self.batches)}")
@@ -161,11 +161,11 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
             cache = self.get_cache(img_md)
             latents = cache.get('latents')
             if latents is None:
-                if (image := self.get_image(img_md)) is not None:
-                    if is_flipped:
-                        image = torch.flip(image, dims=[2])
-                else:
+                image = self.get_bucket_image(img_md)
+                if image is None:
                     raise FileNotFoundError(f"Image and cache not found for `{img_key}`")
+                if is_flipped:
+                    image = torch.flip(image, dims=[2])
             else:
                 if is_flipped:
                     latents = torch.flip(latents, dims=[2])  # latents.shape: [C, H, W]
@@ -210,16 +210,6 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
     def __len__(self):
         return len(self.batches)
 
-    @ property
-    def host(self):
-        return self.data.host if hasattr(self.data, 'host') else None
-
-    def get_host_img_md(self, img_md):
-        if not self.host:
-            return None
-        index = int(img_md['image_key'])
-        return self.host[index]
-
     def get_size(self, img_md):
         image_size, original_size, bucket_size = None, None, None
         if (image_size := img_md.get('image_size')) is None:
@@ -260,7 +250,17 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
         image = dataset_utils.convert_to_rgb(image)
         image = dataset_utils.rotate_image_straight(image)
         image = np.array(image, np.uint8)  # (H, W, C)
-        image = dataset_utils.process_image(image, target_size=img_md['bucket_size'])
+        return image
+
+    def get_bucket_image(self, img_md):
+        image = self.get_image(img_md)
+        if image is None:
+            return None
+        target_size = img_md['bucket_size']
+        image, crop_ltrb = dataset_utils.crop_if_needed(image, target_size, max_ar=self.max_aspect_ratio)
+        image = dataset_utils.resize_if_needed(image, target_size)
+        image = dataset_utils.IMAGE_TRANSFORMS(image)
+        img_md['crop_ltrb'] = crop_ltrb  # crop_ltrb: (left, top, right, bottom), set for sdxl
         return image
 
     def get_input_ids(self, caption, tokenizer):

@@ -34,6 +34,8 @@ def get_config():
     config.flip_aug = True
     config.bucket_reso_step = 32
     config.max_aspect_ratio = 1.1
+    config.max_width = 1536
+    config.max_height = 1536
     config.predefined_buckets = None
     config.vae_batch_size = 16
     config.max_dataset_n_workers = 1
@@ -111,7 +113,6 @@ def get_config():
     config.cpu = False
 
     # Advanced Parameters
-    config.max_token_length = 225
     config.mem_eff_attn = False
     config.xformers = True
     config.diffusers_xformers = False
@@ -129,7 +130,6 @@ def get_config():
     config.debiased_estimation_loss = False
     config.min_timestep = 0
     config.max_timestep = 1000
-    config.max_token_length = 225
     config.timestep_sampler_type = "logit_normal"
     config.timestep_sampler_kwargs = cfg(
         mu=1.09861228867,  # log(3) for 1024x1024
@@ -150,3 +150,30 @@ def get_config():
     config.async_cache = True
 
     return config
+
+
+def get_dataset_info(dataset, **kwargs):
+    return None
+
+
+def get_data_weight(img_md, dataset_info, **kwargs):
+    return 1
+
+
+def postprocess_caption(
+    img_md,
+    dataset_info,
+    **kwargs,
+):
+    r"""
+    Post-process a caption when the data is loaded by the train dataloader.
+    """
+    return img_md['caption']
+
+
+def postprocess_description(
+    img_md,
+    dataset_info,
+    ** kwargs,
+):
+    return img_md['description']

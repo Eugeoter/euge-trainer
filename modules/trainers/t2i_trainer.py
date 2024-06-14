@@ -5,6 +5,7 @@ import torch
 import gc
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
+from typing import Literal
 from ..utils import log_utils, advanced_train_utils, train_utils, model_utils, class_utils
 from ..train_state.train_state import TrainState
 from ..pipelines.lpw_stable_diffusion import StableDiffusionLongPromptWeightingPipeline
@@ -15,23 +16,56 @@ from ..pipelines.lpw_stable_diffusion import StableDiffusionLongPromptWeightingP
 
 class T2ITrainer(class_utils.FromConfigMixin):
     vae_model_name_or_path: str = None
+    vae_batch_size: int = 16
     no_half_vae: bool = False
     tokenizer_cache_dir: str = None
     max_token_length: int = None
-    ignore_warnings: bool = True
+
     block_lr: list = None
     gradient_checkpointing: bool = False
     gradient_accumulation_steps: int = 1
+    lr_warmup_steps: int = 0
+    lr_scheduler_power: float = 1.0
+    lr_scheduler_num_cycles: int = 1
+    lr_scheduler_kwargs: dict = class_utils.cfg()
+    mixed_precision: Literal['fp16', 'bf16', 'float'] = 'fp16'
     full_fp16: bool = False
     full_bf16: bool = False
+
     xformers: bool = False
+    mem_eff_attn: bool = False
+    sdpa: bool = False
+    clip_skip: int = None
+    noise_offset: float = 0
+    multires_noise_iterations: int = 0
+    multires_noise_discount: float = 0.25
+    adaptive_noise_scale: float = None
+    max_grad_norm: float = 0.5
+    prediction_type: Literal['epsilon', 'velocity'] = 'epsilon'
+    zero_terminal_snr: bool = False
+    ip_noise_gamma: float = None
+    min_snr_gamma: float = None
+    debiased_estimation_loss: bool = False
+    min_timestep: int = 0
+    max_timestep: int = 1000
+    max_token_length: int = 225
+    timestep_sampler_type: str = 'uniform'
+    timestep_sampler_kwargs: dict = class_utils.cfg()
     cpu: bool = False
+
     hf_cache_dir: str = None
     hf_token: str = None
     max_retries: int = None
+
     dataset_class = T2ITrainDataset
     nnet_class = UNet2DConditionModel
     pipeline_class = StableDiffusionLongPromptWeightingPipeline
+    train_state_class = TrainState
+
+    persistent_data_loader_workers: bool = False
+    max_dataloader_n_workers: int = 4
+    max_dataset_n_workers: int = 1
+    ignore_warnings: bool = True
     loss_recorder_kwargs = class_utils.cfg(
         gamma=0.9,
         stride=1000,
@@ -261,7 +295,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
     def _setup_one_text_encoder_params(self, text_encoder, lr):
         training_models = []
         params_to_optimize = []
-        
+
         lr = lr or self.learning_rate
         train_text_encoder = self.train_text_encoder and lr > 0
         if train_text_encoder:
@@ -322,24 +356,6 @@ class T2ITrainer(class_utils.FromConfigMixin):
             optimizer, lr_scheduler, self.train_dataloader
         )
 
-    def _setup_train_state(self):
-        self.train_state = self.get_train_state()
-
-    def get_train_state(self):
-        return TrainState.from_config(
-            self.config,
-            self.accelerator,
-            pipeline_class=StableDiffusionLongPromptWeightingPipeline,
-            optimizer=self.optimizer,
-            lr_scheduler=self.lr_scheduler,
-            train_dataloader=self.train_dataloader,
-            save_dtype=self.save_dtype,
-            nnet=self.nnet,
-            text_encoder=self.text_encoder,
-            tokenizer=self.tokenizer,
-            vae=self.vae,
-        )
-
     def _setup_noise_scheduler(self):
         self.noise_scheduler = self.get_noise_scheduler()
 
@@ -360,6 +376,24 @@ class T2ITrainer(class_utils.FromConfigMixin):
     def get_loss_recorder(self):
         return train_utils.LossRecorder(
             gamma=self.loss_recorder_kwargs.gamma, max_window=min(self.num_steps_per_epoch, 10000)
+        )
+
+    def _setup_train_state(self):
+        self.train_state = self.get_train_state()
+
+    def get_train_state(self):
+        return self.train_state_class.from_config(
+            self.config,
+            self.accelerator,
+            pipeline_class=self.pipeline_class,
+            optimizer=self.optimizer,
+            lr_scheduler=self.lr_scheduler,
+            train_dataloader=self.train_dataloader,
+            save_dtype=self.save_dtype,
+            nnet=self.nnet,
+            text_encoder=self.text_encoder,
+            tokenizer=self.tokenizer,
+            vae=self.vae,
         )
 
     def _print_start_training_message(self):
