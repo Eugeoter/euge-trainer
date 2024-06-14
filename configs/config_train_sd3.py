@@ -12,10 +12,10 @@ def get_config():
     config.pretrained_model_name_or_path = 'stabilityai/stable-diffusion-3-medium-diffusers'
     # config.pretrained_model_name_or_path = '/local/path/to/stabilityai/stable-diffusion-3-medium-diffusers/' # optional
     config.image_dirs = [
-        '/path/to/images/',
+        r'datasets/dataset',
     ]
     config.metadata_files = [
-        '/path/to/metadata.json',
+        r'datasets/md.json',
     ]
     config.output_dir = 'projects/my_project/'
     config.resume_from = None

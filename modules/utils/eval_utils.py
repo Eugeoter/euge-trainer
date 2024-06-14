@@ -242,7 +242,7 @@ def sample_during_train(
                     # original_height=param["original_height"],
                     # original_scale_factor=param["original_scale_factor"],
                     num_images_per_prompt=param["batch_count"],
-                    callback_on_step_end_tensor_inputs=save_latents_callback if param["save_latents"] else None,
+                    # callback_on_step_end_tensor_inputs=save_latents_callback if param["save_latents"] else None,
                 )
                 if param["control_image"] is not None:
                     pipeline_input["controlnet_image"] = param["control_image"]
@@ -270,7 +270,7 @@ def sample_during_train(
                     images_overlaid.append(image_overlaid)
 
             if has_controlnet:
-                images_grid = concat_images([control_image] + images_grid)
+                images_grid = concat_images([control_image] + images)
             else:
                 images_grid = concat_images(images)
             grid_filename = f"images_grid-{num_suffix}-{i}.png"

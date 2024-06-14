@@ -12,13 +12,13 @@ class SD3TrainState(TrainState):
 
     def get_pipeline(self):
         return self.pipeline_class(
-            vae=self.models['vae'],
-            text_encoder=self.models['text_encoder'][0],
-            text_encoder_2=self.models['text_encoder'][1],
-            text_encoder_3=self.models['text_encoder'][2],
+            transformer=self.unwrap_model(self.models.nnet),
+            vae=self.unwrap_model(self.models.vae),
+            text_encoder=self.unwrap_model(self.models.text_encoder[0]),
+            text_encoder_2=self.unwrap_model(self.models.text_encoder[1]),
+            text_encoder_3=self.unwrap_model(self.models.text_encoder[2]),
             tokenizer=self.tokenizer[0],
             tokenizer_2=self.tokenizer[1],
             tokenizer_3=self.tokenizer[2],
-            transformer=self.models['nnet'],
-            scheduler=self.noise_scheduler,
+            scheduler=self.models.noise_scheduler,
         )

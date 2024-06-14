@@ -80,6 +80,7 @@ class TrainState(class_utils.FromConfigMixin):
         for key, val in kwargs.items():
             if isinstance(val, torch.nn.Module) or (isinstance(val, (tuple, list)) and any(isinstance(v, torch.nn.Module) for v in val)):
                 models[key] = val
+        models = Namespace(**models)
         logger = log_utils.get_logger(cls.__name__)
         return super().from_config(
             config,
@@ -188,9 +189,11 @@ class TrainState(class_utils.FromConfigMixin):
             self.accelerator.wait_for_everyone()
 
     def get_pipeline(self):
-        pipeline_modules = {k: self.unwrap_model(v) for k, v in self.models.items()}
         return self.pipeline_class(
-            **pipeline_modules,
+            unet=self.unwrap_model(self.models.nnet),
+            text_encoder=self.unwrap_model(self.models.text_encoder),
+            tokenizer=self.tokenizer,
+            vae=self.unwrap_model(self.models.vae),
             scheduler=eval_utils.get_sampler(self.sample_sampler),
             safety_checker=None,
             feature_extractor=None,

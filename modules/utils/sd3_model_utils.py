@@ -85,18 +85,23 @@ def load_models_from_stable_diffusion_checkpoint(ckpt_path, device="cpu", dtype=
         raise NotImplementedError
 
 
-def load_models_from_stable_diffusion_diffusers_state(pretrained_model_name_or_path, device="cpu", dtype=None, revision=None, variant=None, cache_dir=None, token=None, nnet_class=SD3Transformer2DModel, max_retries=None):
+def load_models_from_stable_diffusion_diffusers_state(pretrained_model_name_or_path, device="cpu", dtype=None, revision=None, variant=None, cache_dir=None, token=None, nnet_class=SD3Transformer2DModel, include_t5=False, max_retries=None):
     # Diffusers model is loaded to CPU
     logger.print(f"load diffusers pretrained models: {pretrained_model_name_or_path}")
     from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import StableDiffusion3Pipeline
     retries = 0
     while True:
         try:
+            kwargs = {}
+            if not include_t5:
+                kwargs['text_encoder_3'] = None
+                kwargs['tokenizer_3'] = None
             pipe: StableDiffusion3Pipeline = StableDiffusion3Pipeline.from_pretrained(
                 pretrained_model_name_or_path,
                 token=token,
                 torch_dtype=dtype,
                 cache_dir=cache_dir,
+                **kwargs,
             )
             break
         except model_utils.NETWORK_EXCEPTIONS:

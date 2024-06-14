@@ -43,6 +43,7 @@ class SD3T2ITrainer(T2ITrainer):
                 dtype=torch.float16,
                 cache_dir=self.hf_cache_dir,
                 nnet_class=self.nnet_class,
+                include_t5=self.include_t5,
                 max_retries=self.max_retries,
             )
         models.update(models_)

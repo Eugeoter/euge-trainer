@@ -204,28 +204,63 @@ def resize_if_needed(image: Union[Image.Image, np.ndarray], target_size):
 
 
 def crop_if_needed(image: Union[Image.Image, np.ndarray], target_size, max_ar=None):
-    image_size = image.size if isinstance(image, Image.Image) else image.shape[:2]
-    if max_ar is not None and (ar_diff := aspect_ratio_diff(image_size, target_size)) >= max_ar:
-        img_w, img_h = image_size
-        tar_w, tar_h = target_size
-        ar_image = img_w / img_h
-        ar_target = tar_w / tar_h
+    image_size = image.size if isinstance(image, Image.Image) else (image.shape[1], image.shape[0])
+    img_w, img_h = image_size
+    tar_w, tar_h = target_size
+
+    ar_image = img_w / img_h
+    ar_target = tar_w / tar_h
+
+    if max_ar is not None and aspect_ratio_diff(image_size, target_size) > max_ar:
         if ar_image < ar_target:
-            ar_new = ar_target / max_ar
-            new_img_w = img_w
-            new_img_h = img_w / ar_new
+            new_height = img_w / ar_target * max_ar
+            new_width = img_w
         else:
-            ar_new = ar_target * max_ar
-            new_img_w = img_h * ar_new
-            new_img_h = img_h
-        left = int((new_img_w - img_w) / 2)
-        top = int((new_img_h - img_h) / 2)
-        right = int((new_img_w + img_w) / 2)
-        bottom = int((new_img_h + img_h) / 2)
+            new_width = img_h * ar_target / max_ar
+            new_height = img_h
+
+        left = max(0, int((img_w - new_width) / 2))
+        top = max(0, int((img_h - new_height) / 2))
+        right = int(left + new_width)
+        bottom = int(top + new_height)
         crop_ltrb = (left, top, right, bottom)
-        image = image.crop(crop_ltrb) if isinstance(image, Image.Image) else image[top:bottom, left:right]
+
+        if isinstance(image, Image.Image):
+            image = image.crop(crop_ltrb)
+        else:
+            image = image[top:bottom, left:right]
     else:
-        crop_ltrb = (0, 0, image_size[0], image_size[1])
+        crop_ltrb = (0, 0, img_w, img_h)
+
+    return image, crop_ltrb
+
+
+def center_crop_if_needed(image: Union[Image.Image, np.ndarray], target_size):
+    image_size = image.size if isinstance(image, Image.Image) else (image.shape[1], image.shape[0])
+    img_w, img_h = image_size
+    tar_w, tar_h = target_size
+
+    ar_image = img_w / img_h
+    ar_target = tar_w / tar_h
+
+    if ar_image < ar_target:
+        new_height = img_w / ar_target
+        new_width = img_w
+    else:
+        new_width = img_h * ar_target
+        new_height = img_h
+
+    left = max(0, int((img_w - new_width) / 2))
+    top = max(0, int((img_h - new_height) / 2))
+    right = int(left + new_width)
+    bottom = int(top + new_height)
+    crop_ltrb = (left, top, right, bottom)
+
+    if isinstance(image, Image.Image):
+        image = image.crop(crop_ltrb)
+    else:
+        image = image[top:bottom, left:right]
+
     return image, crop_ltrb
 
 

@@ -136,5 +136,7 @@ def get_bucket_size(
     if not allow_upscale and (img_w < bucket_w or img_h < bucket_h):
         bucket_w = img_w // divisible * divisible
         bucket_h = img_h // divisible * divisible
+    bucket_w = max(bucket_w, divisible)
+    bucket_h = max(bucket_h, divisible)
     bucket_size = (bucket_w, bucket_h)
     return bucket_size
