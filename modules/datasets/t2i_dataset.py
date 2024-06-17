@@ -25,10 +25,10 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
     batch_size: int = 1
     flip_aug: bool = False
     records_cache_dir: str = None
+    data_preprocessor: Callable = lambda self, img_md, *args, **kwargs: img_md
     dataset_info_getter: Callable = lambda self, dataset, *args, **kwargs: None
     data_weight_getter: Callable = lambda self, img_md, *args, **kwargs: 1
-    caption_postprocessor: Callable = lambda self, img_md, *args, **kwargs: img_md['caption']
-    description_postprocessor: Callable = lambda self, img_md, *args, **kwargs: img_md['description']
+    caption_getter: Callable = lambda self, img_md, *args, **kwargs: img_md.get('caption') or ''
 
     @classmethod
     def from_config(cls, config, accelerator, **kwargs):
@@ -41,6 +41,10 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
         self.dataset_info = self.get_dataset_info()
         for img_md in self.logger.tqdm(self.data.values(), desc='prepare dataset'):
             self.load_data(img_md)
+        for img_key, img_md in list(self.data.items()):
+            if img_md.get('weight', 1) == 0:
+                del self.data[img_key]
+        self.logger.print(f"num_data_after_filtering: {len(self.data)}")
         self.logger.print(f"num_repeats: {sum(img_md.get('weight', 1) for img_md in self.data.values())}")
         self.buckets = self.make_buckets()
         if not self.arb:
@@ -103,7 +107,11 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
         imageset = self.load_image_dataset()
         if self.cache_latents:
             cacheset = self.load_cache_dataset()
-            imageset.apply_map(mapping.redirect_columns, columns=['cache_path'], tarset=cacheset)
+            for img_key, cache_md in cacheset.items():
+                if img_key in imageset:
+                    imageset[img_key]['cache_path'] = cache_md['cache_path']
+                else:
+                    imageset[img_key] = cache_md
         return imageset
 
     def load_image_dataset(self) -> DictDataset:
@@ -120,6 +128,9 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
 
     def get_dataset_info(self) -> Any:
         return self.dataset_info_getter(self)
+
+    def get_preprocessed_img_md(self, img_md) -> Dict:
+        return self.data_preprocessor(img_md, dataset_info=self.dataset_info)
 
     def make_batches(self) -> List[List[str]]:
         if self.arb:
@@ -138,6 +149,7 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
         return batches
 
     def load_data(self, img_md) -> Dict:
+        img_md = self.get_preprocessed_img_md(img_md)
         image_size, original_size, bucket_size = self.get_size(img_md)
         weight = self.get_data_weight(img_md)
         img_md.update(
@@ -173,17 +185,7 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
                 if self.keep_cached_latents_in_memory:
                     img_md.update(cache)
 
-            extra_kwargs = dict(is_flipped=is_flipped)
-            if img_md.get('description') is not None and img_md.get('caption') is not None:
-                caption = self.get_caption_during_training(img_md, **extra_kwargs) if random.random() > 0.5 else self.get_description_during_training(img_md, **extra_kwargs)
-                # print(f"caption of {image_info.key}: {caption}")
-            elif img_md.get('description') is not None:
-                caption = self.get_description_during_training(img_md, **extra_kwargs)
-            elif img_md.get('caption') is not None:
-                caption = self.get_caption_during_training(img_md, **extra_kwargs)
-            else:
-                log_utils.warn(f"no caption or tags found for image: {img_md.key}")
-                caption = ''
+            caption = self.get_caption(img_md, is_flipped=is_flipped)
 
             sample["image_keys"].append(img_key)
             sample["images"].append(image)
@@ -256,21 +258,45 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
         image = self.get_image(img_md)
         if image is None:
             return None
-        target_size = img_md['bucket_size']
-        image, crop_ltrb = dataset_utils.crop_if_needed(image, target_size, max_ar=self.max_aspect_ratio)
-        image = dataset_utils.resize_if_needed(image, target_size)
+        crop_ltrb = self.get_crop_ltrb(img_md)
+        image = dataset_utils.crop_ltrb_if_needed(image, crop_ltrb)
+        image = dataset_utils.resize_if_needed(image, img_md['bucket_size'])
         image = dataset_utils.IMAGE_TRANSFORMS(image)
         img_md['crop_ltrb'] = crop_ltrb  # crop_ltrb: (left, top, right, bottom), set for sdxl
         return image
 
+    def get_crop_ltrb(self, img_md):
+        image_size = img_md['image_size']
+        bucket_size = img_md['bucket_size']
+        max_ar = self.max_aspect_ratio
+        img_w, img_h = image_size
+        tar_w, tar_h = bucket_size
+
+        ar_image = img_w / img_h
+        ar_target = tar_w / tar_h
+
+        if max_ar is not None and dataset_utils.aspect_ratio_diff(image_size, bucket_size) > max_ar:
+            if ar_image < ar_target:
+                new_height = img_w / ar_target * max_ar
+                new_width = img_w
+            else:
+                new_width = img_h * ar_target / max_ar
+                new_height = img_h
+
+            left = max(0, int((img_w - new_width) / 2))
+            top = max(0, int((img_h - new_height) / 2))
+            right = int(left + new_width)
+            bottom = int(top + new_height)
+            crop_ltrb = (left, top, right, bottom)
+        else:
+            crop_ltrb = (0, 0, img_w, img_h)
+        return crop_ltrb
+
     def get_input_ids(self, caption, tokenizer):
         return dataset_utils.get_input_ids(caption, tokenizer, max_token_length=self.max_token_length)
 
-    def get_caption_during_training(self, img_md, is_flipped=False):
-        return self.caption_postprocessor(img_md, dataset_info=self.dataset_info, is_flipped=is_flipped)
-
-    def get_description_during_training(self, img_md, is_flipped=False):
-        return self.description_postprocessor(img_md, dataset_info=self.dataset_info, is_flipped=is_flipped)
+    def get_caption(self, img_md, is_flipped=False):
+        return self.caption_getter(img_md, dataset_info=self.dataset_info, is_flipped=is_flipped)
 
     def get_data_weight(self, img_md):
         return self.data_weight_getter(img_md, dataset_info=self.dataset_info)

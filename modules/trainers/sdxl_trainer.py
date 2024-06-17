@@ -4,8 +4,8 @@ import gc
 from .t2i_trainer import T2ITrainer
 from ..datasets.sdxl_dataset import SDXLTrainDataset
 from ..utils import model_utils, train_utils, sdxl_model_utils, sdxl_train_utils
-from ..models.sdxl_original_unet import SdxlUNet2DConditionModel
-from ..pipelines.lpw_sdxl import SdxlStableDiffusionLongPromptWeightingPipeline
+from ..models.nnet.sdxl_original_unet import SdxlUNet2DConditionModel
+from ..pipelines.sdxl_lpw_pipeline import SdxlStableDiffusionLongPromptWeightingPipeline
 from ..train_state.sdxl_train_state import SDXLTrainState
 
 
@@ -20,10 +20,10 @@ class SDXLT2ITrainer(T2ITrainer):
 
     def load_diffusion_model(self):
         models = {}
-        tokenizer1, tokenizer2 = sdxl_train_utils.load_sdxl_tokenizers(self.tokenizer_cache_dir, self.max_token_length)
+        tokenizer1, tokenizer2 = sdxl_train_utils.load_sdxl_tokenizers(self.tokenizer_cache_dir or self.hf_cache_dir, self.max_token_length)
         models['tokenizer1'], models['tokenizer2'] = tokenizer1, tokenizer2
         if os.path.isfile(self.pretrained_model_name_or_path):
-            models_ = sdxl_model_utils.load_models_from_sdxl_checkpoint(
+            diffusion_models = sdxl_model_utils.load_models_from_sdxl_checkpoint(
                 self.pretrained_model_name_or_path,
                 device=self.device,
                 dtype=self.weight_dtype,
@@ -31,7 +31,7 @@ class SDXLT2ITrainer(T2ITrainer):
             )
 
         else:
-            models_ = sdxl_model_utils.load_models_from_sdxl_diffusers_state(
+            diffusion_models = sdxl_model_utils.load_models_from_sdxl_diffusers_state(
                 self.pretrained_model_name_or_path,
                 device=self.device,
                 dtype=self.weight_dtype,
@@ -41,7 +41,7 @@ class SDXLT2ITrainer(T2ITrainer):
                 nnet_class=self.nnet_class,
                 max_retries=self.max_retries,
             )
-        models.update(models_)
+        models.update(diffusion_models)
         if self.vae_model_name_or_path is not None:
             models['vae'] = model_utils.load_vae(self.vae_model_name_or_path, dtype=self.weight_dtype)
             self.logger.print(f"additional vae model loaded from {self.vae_model_name_or_path}")
@@ -66,6 +66,11 @@ class SDXLT2ITrainer(T2ITrainer):
         )
         training_models.extend(training_models_)
         params_to_optimize.extend(params_to_optimize_)
+
+        # freeze last layer and final_layer_norm in te1 since we use the output of the penultimate layer
+        if self.train_text_encoder1:
+            self.text_encoder1.text_model.encoder.layers[-1].requires_grad_(False)
+            self.text_encoder1.text_model.final_layer_norm.requires_grad_(False)
 
         (
             training_models_,

@@ -20,5 +20,5 @@ class SD3TrainState(TrainState):
             tokenizer=self.tokenizer[0],
             tokenizer_2=self.tokenizer[1],
             tokenizer_3=self.tokenizer[2],
-            scheduler=self.models.noise_scheduler,
+            scheduler=self.noise_scheduler,
         )

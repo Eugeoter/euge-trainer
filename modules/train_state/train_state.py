@@ -36,6 +36,7 @@ class TrainState(class_utils.FromConfigMixin):
     sample_benchmark: str = None
     sample_every_n_steps: int = None
     sample_every_n_epochs: int = 1
+    sample_at_first: bool = False
     sample_sampler: str = 'euler_a'
     sample_params = class_utils.cfg(
         prompt="1girl, solo, cowboy shot, white background, smile, looking at viewer, serafuku, pleated skirt",
@@ -81,7 +82,7 @@ class TrainState(class_utils.FromConfigMixin):
             if isinstance(val, torch.nn.Module) or (isinstance(val, (tuple, list)) and any(isinstance(v, torch.nn.Module) for v in val)):
                 models[key] = val
         models = Namespace(**models)
-        logger = log_utils.get_logger(cls.__name__)
+        logger = log_utils.get_logger('train_state', disable=not accelerator.is_local_main_process)
         return super().from_config(
             config,
             accelerator=accelerator,
@@ -211,9 +212,10 @@ class TrainState(class_utils.FromConfigMixin):
 
     def sample(self, on_step_end=False, on_epoch_end=False, on_train_end=False):
         do_sample = False
-        do_sample |= bool(on_step_end and self.global_step and self.sample_every_n_steps and self.global_step % self.sample_every_n_steps == 0)
-        do_sample |= bool(on_epoch_end and self.epoch and self.sample_every_n_epochs and self.epoch % self.sample_every_n_epochs == 0)
+        do_sample |= bool(on_step_end and self.sample_every_n_steps and self.global_step % self.sample_every_n_steps == 0)
+        do_sample |= bool(on_epoch_end and self.sample_every_n_epochs and self.epoch % self.sample_every_n_epochs == 0)
         do_sample |= bool(on_train_end)
+        do_sample |= bool(self.sample_at_first and self.global_step == 0)
         if do_sample:
             self.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process:

@@ -5,23 +5,24 @@ import torch
 import gc
 from accelerate import Accelerator
 from diffusers import DDPMScheduler
-from typing import Literal
+from typing import Literal, List, Dict, Any
 from ..utils import log_utils, advanced_train_utils, train_utils, model_utils, class_utils
 from ..train_state.train_state import TrainState
-from ..pipelines.lpw_stable_diffusion import StableDiffusionLongPromptWeightingPipeline
-from ..models.original_unet import UNet2DConditionModel
+from ..pipelines.lpw_pipeline import StableDiffusionLongPromptWeightingPipeline
+from ..models.nnet.original_unet import UNet2DConditionModel
 from ..datasets.t2i_dataset import T2ITrainDataset
-from ..pipelines.lpw_stable_diffusion import StableDiffusionLongPromptWeightingPipeline
+from ..pipelines.lpw_pipeline import StableDiffusionLongPromptWeightingPipeline
 
 
 class T2ITrainer(class_utils.FromConfigMixin):
+    pretrained_model_name_or_path: str
     vae_model_name_or_path: str = None
-    vae_batch_size: int = 16
     no_half_vae: bool = False
     tokenizer_cache_dir: str = None
     max_token_length: int = None
+    revision: str = None
+    variant: str = None
 
-    block_lr: list = None
     gradient_checkpointing: bool = False
     gradient_accumulation_steps: int = 1
     lr_warmup_steps: int = 0
@@ -31,6 +32,13 @@ class T2ITrainer(class_utils.FromConfigMixin):
     mixed_precision: Literal['fp16', 'bf16', 'float'] = 'fp16'
     full_fp16: bool = False
     full_bf16: bool = False
+
+    learning_rate: float
+    train_nnet: bool = True
+    nnet_param_names: List[str] = None
+    learning_rate_nnet: float = None
+    train_text_encoder: bool = False
+    learning_rate_te: float = None
 
     xformers: bool = False
     mem_eff_attn: bool = False
@@ -49,8 +57,8 @@ class T2ITrainer(class_utils.FromConfigMixin):
     min_timestep: int = 0
     max_timestep: int = 1000
     max_token_length: int = 225
-    timestep_sampler_type: str = 'uniform'
-    timestep_sampler_kwargs: dict = class_utils.cfg()
+    timestep_sampler_type: Literal['uniform', 'logit_normal'] = 'uniform'
+    timestep_sampler_kwargs: Dict[str, Any] = class_utils.cfg()
     cpu: bool = False
 
     hf_cache_dir: str = None
@@ -142,6 +150,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
         self.vae.requires_grad_(False)
         self.vae.eval()
         self.vae_scale_factor = self.get_vae_scale_factor()
+        self.logger.print(f"VAE scale factor: {self.vae_scale_factor}")
 
     def load_models(self):
         models = {}
@@ -155,12 +164,12 @@ class T2ITrainer(class_utils.FromConfigMixin):
         tokenizer = model_utils.load_tokenizer(
             model_utils.TOKENIZER_PATH if not self.v2 else model_utils.V2_STABLE_DIFFUSION_PATH,
             subfolder=None if not self.v2 else 'tokenizer',
-            cache_dir=self.tokenizer_cache_dir,
+            cache_dir=self.tokenizer_cache_dir or self.hf_cache_dir,
             max_token_length=self.max_token_length
         )
         models['tokenizer'] = tokenizer
         if os.path.isfile(self.pretrained_model_name_or_path):
-            models_ = model_utils.load_models_from_stable_diffusion_checkpoint(
+            diffusion_models = model_utils.load_models_from_stable_diffusion_checkpoint(
                 self.pretrained_model_name_or_path,
                 device=self.device,
                 dtype=self.weight_dtype,
@@ -169,7 +178,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
             )
 
         else:
-            models_ = model_utils.load_models_from_stable_diffusion_diffusers_state(
+            diffusion_models = model_utils.load_models_from_stable_diffusion_diffusers_state(
                 self.pretrained_model_name_or_path,
                 device=self.device,
                 dtype=self.weight_dtype,
@@ -177,7 +186,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
                 nnet_class=self.nnet_class,
                 max_retries=self.max_retries,
             )
-        models.update(models_)
+        models.update(diffusion_models)
         if self.vae_model_name_or_path is not None:
             models['vae'] = model_utils.load_vae(self.vae_model_name_or_path, dtype=self.weight_dtype)
             self.logger.print(f"additional vae model loaded from {self.vae_model_name_or_path}")
@@ -224,7 +233,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
         return DataLoader(
             self.train_dataset,
             batch_size=1,
-            num_workers=min(self.max_dataloader_n_workers, os.cpu_count() - 1),
+            num_workers=min(self.max_dataloader_n_workers, os.cpu_count()),
             shuffle=True,
             collate_fn=self.train_dataset.collate_fn,
             persistent_workers=self.persistent_data_loader_workers,
@@ -244,6 +253,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
         num_train_params = 0
         for model_params_setter in dir(self):
             if model_params_setter.startswith("setup_") and model_params_setter.endswith('_params') and callable(getattr(self, model_params_setter)):
+                self.logger.print(f"setting up {model_params_setter[6:-7]} parameters...")
                 try:
                     training_models_, params_to_optimize_ = getattr(self, model_params_setter)()
                 except NotImplementedError:
@@ -266,29 +276,30 @@ class T2ITrainer(class_utils.FromConfigMixin):
         training_models = []
         params_to_optimize = []
 
-        train_nnet = self.learning_rate > 0 or any([lr > 0 for lr in self.block_lr])
+        learning_rate_nnet = self.learning_rate_nnet or self.learning_rate
+        train_nnet = self.train_nnet and learning_rate_nnet > 0
         if train_nnet:
             if self.gradient_checkpointing:
                 self.nnet.enable_gradient_checkpointing()
-            self.nnet.requires_grad_(True)
             training_models.append(self.nnet)
-            if self.block_lr is None:
-                params_to_optimize.append({"params": list(self.nnet.parameters()), "lr": self.learning_rate})
+            if self.nnet_param_names is not None:  # only train specific parameters
+                self.nnet.requires_grad_(False)
+                nnet_params = []
+                for name, params in self.nnet.named_parameters():
+                    if any(pname in name for pname in self.nnet_param_names):
+                        params.requires_grad = True
+                        nnet_params.append(params)
+                params_to_optimize.append({"params": nnet_params, "lr": self.learning_rate})
             else:
-                # TODO: block_lr
-                raise NotImplementedError
-                # assert (
-                #     isinstance(self.block_lr, list) and
-                #     len(self.block_lr) == train_utils.UNET_NUM_BLOCKS_FOR_BLOCK_LR
-                # ), f"block_lr must have {sdxl_train_utils.UNET_NUM_BLOCKS_FOR_BLOCK_LR} values"
-                # params_to_optimize.extend(sdxl_train_utils.get_block_params_to_optimize(self.nnet, self.block_lr))
+                self.nnet.requires_grad_(True)
+                params_to_optimize.append({"params": list(self.nnet.parameters()), "lr": self.learning_rate})
         else:
             self.nnet.requires_grad_(False)
         self.nnet.to(self.device, dtype=self.weight_dtype)
 
         self.nnet = self._prepare_one_model(self.nnet, train=train_nnet, transform_model_if_ddp=True)
         self.train_nnet = train_nnet
-        self.learning_rate_nnet = self.block_lr or self.learning_rate
+        self.learning_rate_nnet = self.learning_rate_nnet or self.learning_rate
 
         return training_models, params_to_optimize
 
@@ -527,6 +538,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
         return loss
 
     def train_loop(self):
+        self.train_state.sample()  # on train start
         while self.train_state.epoch < self.num_train_epochs:
             if self.accelerator.is_main_process:
                 self.pbar.write(f"epoch: {self.train_state.epoch}/{self.num_train_epochs}")

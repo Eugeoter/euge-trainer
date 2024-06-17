@@ -4,10 +4,9 @@ from accelerate import init_empty_weights
 from accelerate.utils.modeling import set_module_tensor_to_device
 from safetensors.torch import load_file, save_file
 from transformers import CLIPTextModel, CLIPTextConfig, CLIPTextModelWithProjection, CLIPTokenizer
-from typing import List
 from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
 from . import model_utils, log_utils
-from ..models.sdxl_original_unet import SdxlUNet2DConditionModel
+from ..models.nnet.sdxl_original_unet import SdxlUNet2DConditionModel
 
 VAE_SCALE_FACTOR = 0.13025
 MODEL_VERSION_SDXL_BASE_V1_0 = "sdxl_base_v1-0"
@@ -202,146 +201,25 @@ def _load_state_dict_on_device(model, state_dict, device, dtype=None):
     unexpected_keys = list(state_dict.keys() - model.state_dict().keys())
 
     # similar to model.load_state_dict()
+    for k in list(state_dict.keys()):
+        set_module_tensor_to_device(model, k, device, value=state_dict.pop(k), dtype=dtype)
     if not missing_keys and not unexpected_keys:
-        for k in list(state_dict.keys()):
-            set_module_tensor_to_device(model, k, device, value=state_dict.pop(k), dtype=dtype)
         return "<All keys matched successfully>"
+    elif not missing_keys:
+        return "<All keys matched successfully> " + f"but there are {len(unexpected_keys)} unexpected keys: {unexpected_keys}"
+    elif not unexpected_keys:
+        return f"{len(missing_keys)} missing keys: {missing_keys}"
+    return f"{len(missing_keys)} missing keys: {missing_keys} and {len(unexpected_keys)} unexpected keys: {unexpected_keys}"
 
     # error_msgs
-    error_msgs: List[str] = []
-    if missing_keys:
-        error_msgs.insert(0, "Missing key(s) in state_dict: {}. ".format(", ".join('"{}"'.format(k) for k in missing_keys)))
-    if unexpected_keys:
-        error_msgs.insert(0, "Unexpected key(s) in state_dict: {}. ".format(", ".join('"{}"'.format(k) for k in unexpected_keys)))
+    # error_msgs: List[str] = []
+    # if missing_keys:
+    #     error_msgs.insert(0, "Missing key(s) in state_dict: {}. ".format(", ".join('"{}"'.format(k) for k in missing_keys)))
+    # if unexpected_keys:
+    #     error_msgs.insert(0, "Unexpected key(s) in state_dict: {}. ".format(", ".join('"{}"'.format(k) for k in unexpected_keys)))
 
-    raise RuntimeError("Error(s) in loading state_dict for {}:\n\t{}".format(model.__class__.__name__, "\n\t".join(error_msgs)))
+    # raise RuntimeError("Error(s) in loading state_dict for {}:\n\t{}".format(model.__class__.__name__, "\n\t".join(error_msgs)))
 
-
-# def load_models_from_sdxl_checkpoint(model_version, ckpt_path, map_location, dtype=None):
-#     # model_version is reserved for future use
-#     # dtype is used for full_fp16/bf16 integration. Text Encoder will remain fp32, because it runs on CPU when caching
-
-#     # Load the state dict
-#     if model_utils.is_safetensors(ckpt_path):
-#         checkpoint = None
-#         try:
-#             state_dict = load_file(ckpt_path, device=map_location)
-#         except:
-#             state_dict = load_file(ckpt_path)  # prevent device invalid Error
-#         epoch = None
-#         global_step = None
-#     else:
-#         checkpoint = torch.load(ckpt_path, map_location=map_location)
-#         if "state_dict" in checkpoint:
-#             state_dict = checkpoint["state_dict"]
-#             epoch = checkpoint.get("epoch", 0)
-#             global_step = checkpoint.get("global_step", 0)
-#         else:
-#             state_dict = checkpoint
-#             epoch = 0
-#             global_step = 0
-#         checkpoint = None
-
-#     # U-Net
-#     logger.print("building U-Net")
-#     with init_empty_weights():
-#         unet = sdxl_original_unet.SdxlUNet2DConditionModel()
-
-#     logger.print("loading U-Net from checkpoint")
-#     unet_sd = {}
-#     for k in list(state_dict.keys()):
-#         if k.startswith("model.diffusion_model."):
-#             unet_sd[k.replace("model.diffusion_model.", "")] = state_dict.pop(k)
-#     info = _load_state_dict_on_device(unet, unet_sd, device=map_location, dtype=dtype)
-#     logger.print("U-Net: ", info)
-
-#     # Text Encoders
-#     logger.print("building text encoders")
-
-#     # Text Encoder 1 is same to Stability AI's SDXL
-#     text_model1_cfg = CLIPTextConfig(
-#         vocab_size=49408,
-#         hidden_size=768,
-#         intermediate_size=3072,
-#         num_hidden_layers=12,
-#         num_attention_heads=12,
-#         max_position_embeddings=77,
-#         hidden_act="quick_gelu",
-#         layer_norm_eps=1e-05,
-#         dropout=0.0,
-#         attention_dropout=0.0,
-#         initializer_range=0.02,
-#         initializer_factor=1.0,
-#         pad_token_id=1,
-#         bos_token_id=0,
-#         eos_token_id=2,
-#         model_type="clip_text_model",
-#         projection_dim=768,
-#         # torch_dtype="float32",
-#         # transformers_version="4.25.0.dev0",
-#     )
-#     with init_empty_weights():
-#         text_model1 = CLIPTextModel._from_config(text_model1_cfg)
-
-#     # Text Encoder 2 is different from Stability AI's SDXL. SDXL uses open clip, but we use the model from HuggingFace.
-#     # Note: Tokenizer from HuggingFace is different from SDXL. We must use open clip's tokenizer.
-#     text_model2_cfg = CLIPTextConfig(
-#         vocab_size=49408,
-#         hidden_size=1280,
-#         intermediate_size=5120,
-#         num_hidden_layers=32,
-#         num_attention_heads=20,
-#         max_position_embeddings=77,
-#         hidden_act="gelu",
-#         layer_norm_eps=1e-05,
-#         dropout=0.0,
-#         attention_dropout=0.0,
-#         initializer_range=0.02,
-#         initializer_factor=1.0,
-#         pad_token_id=1,
-#         bos_token_id=0,
-#         eos_token_id=2,
-#         model_type="clip_text_model",
-#         projection_dim=1280,
-#         # torch_dtype="float32",
-#         # transformers_version="4.25.0.dev0",
-#     )
-#     with init_empty_weights():
-#         text_model2 = CLIPTextModelWithProjection(text_model2_cfg)
-
-#     logger.print("loading text encoders from checkpoint")
-#     te1_sd = {}
-#     te2_sd = {}
-#     for k in list(state_dict.keys()):
-#         if k.startswith("conditioner.embedders.0.transformer."):
-#             te1_sd[k.replace("conditioner.embedders.0.transformer.", "")] = state_dict.pop(k)
-#         elif k.startswith("conditioner.embedders.1.model."):
-#             te2_sd[k] = state_dict.pop(k)
-
-#     # 一部のposition_idsがないモデルへの対応 / add position_ids for some models
-#     if "text_model.embeddings.position_ids" not in te1_sd:
-#         te1_sd["text_model.embeddings.position_ids"] = torch.arange(77).unsqueeze(0)
-
-#     info1 = _load_state_dict_on_device(text_model1, te1_sd, device=map_location)  # remain fp32
-#     logger.print("text encoder 1:", info1)
-
-#     converted_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(te2_sd, max_length=77)
-#     info2 = _load_state_dict_on_device(text_model2, converted_sd, device=map_location)  # remain fp32
-#     logger.print("text encoder 2:", info2)
-
-#     # prepare vae
-#     logger.print("building VAE")
-#     vae_config = model_utils.create_vae_diffusers_config()
-#     with init_empty_weights():
-#         vae = AutoencoderKL(**vae_config)
-
-#     logger.print("loading VAE from checkpoint")
-#     converted_vae_checkpoint = model_utils.convert_ldm_vae_checkpoint(state_dict, vae_config)
-#     info = _load_state_dict_on_device(vae, converted_vae_checkpoint, device=map_location, dtype=dtype)
-#     logger.print("VAE:", info)
-
-#     ckpt_info = (epoch, global_step) if epoch is not None else None
-#     return text_model1, text_model2, vae, unet, logit_scale, ckpt_info
 
 def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_class=SdxlUNet2DConditionModel):
     vae_config = model_utils.create_vae_diffusers_config()
@@ -364,12 +242,18 @@ def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_
         elif k.startswith(VAE_KEY_PREFIX):
             vae_sd[k] = v
     text_encoder2_sd, logit_scale = convert_sdxl_text_encoder_2_checkpoint(text_encoder2_sd, max_length=77)
+    # if 'text_model.embeddings.position_ids' in text_encoder1_sd:
+    #     del text_encoder1_sd["text_model.embeddings.position_ids"]
+    # if 'text_model.embeddings.position_ids' in text_encoder2_sd:
+    #     del text_encoder2_sd["text_model.embeddings.position_ids"]
     vae_sd = model_utils.convert_ldm_vae_checkpoint(vae_sd, vae_config)
 
     _load_state_dict_on_device(unet, unet_sd, device=device, dtype=dtype)
     _load_state_dict_on_device(text_encoder1, text_encoder1_sd, device=device)
     _load_state_dict_on_device(text_encoder2, text_encoder2_sd, device=device)
     _load_state_dict_on_device(vae, vae_sd, device=device, dtype=dtype)
+    text_encoder1 = text_encoder1.to(device=device)
+    text_encoder2 = text_encoder2.to(device=device)
 
     return {'nnet': unet, 'text_encoder1': text_encoder1, 'text_encoder2': text_encoder2, 'vae': vae, 'logit_scale': logit_scale}
 

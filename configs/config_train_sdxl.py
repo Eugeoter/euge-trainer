@@ -1,4 +1,5 @@
-from typing import Any, List, Tuple
+
+from typing import Any
 from ml_collections import ConfigDict
 
 
@@ -10,11 +11,7 @@ def get_config():
     config = ConfigDict()
 
     # Main parameters
-    config.pretrained_model_name_or_path = 'stabilityai/stable-diffusion-3-medium-diffusers'
-    # config.pretrained_model_name_or_path = '/path/to/stabilityai/stable-diffusion-3-medium-diffusers/' # optional
-
-    # Dataset Parameters
-    # Load from local
+    config.pretrained_model_name_or_path = '/path/to/your/model.safetensors'
     config.image_dirs = [
         '/path/to/images/category_1/',
         '/path/to/images/category_2/',
@@ -23,29 +20,25 @@ def get_config():
     config.metadata_files = [
         '/path/to/metadata.json',
     ]
-
-    # Load from HuggingFace
-    # config.dataset_name_or_path = 'Nahrawy/VIDIT-Depth-ControlNet'
-    # config.dataset_image_column = 'image'
-    # config.dataset_control_image_column = 'depth_map'
-    # config.dataset_caption_column = 'caption'
+    config.output_dir = 'projects/my_project/'
+    config.resume_from = None
 
     # Model Parameters
     config.vae_model_name_or_path = None
     config.no_half_vae = False
-    config.max_token_length = 225
-    config.hf_cache_dir = '/root/autodl-tmp/.cache/huggingface/'
     config.tokenizer_cache_dir = 'tokenizers'
+    config.max_token_length = 225
+    config.hf_cache_dir = None
     config.max_retries = None
 
     # Dataset Parameters
     config.resolution = 1024
     config.arb = True
     config.flip_aug = True
+    config.max_width = None
+    config.max_height = None
     config.bucket_reso_step = 32
     config.max_aspect_ratio = 1.1
-    config.max_width = 2048
-    config.max_height = 2048
     config.predefined_buckets = None
     config.vae_batch_size = 16
     config.max_dataset_n_workers = 1
@@ -79,7 +72,7 @@ def get_config():
     # Sample Parameters
     config.sample_benchmark = r'benchmarks/example_benchmark.json'
     config.sample_every_n_epochs = 1
-    config.sample_every_n_steps = 500
+    config.sample_every_n_steps = 250
     config.sample_at_first = True
     config.sample_sampler = 'euler_a'
 
@@ -88,7 +81,7 @@ def get_config():
         negative_prompt="abstract, bad anatomy, clumsy pose, signature",
         steps=28,
         batch_size=1,
-        batch_count=4,
+        batch_count=1,
         scale=7.5,
         seed=42,
         width=832,
@@ -99,7 +92,9 @@ def get_config():
     # Training Parameters
     config.num_train_epochs = 100
     config.batch_size = 1
-    config.learning_rate = 1e-5
+    config.learning_rate = 2e-6
+    config.train_nnet = True
+    config.learning_rate_nnet = None
     config.lr_scheduler = 'constant_with_warmup'
     config.lr_warmup_steps = 100
     config.lr_scheduler_power = 1.0
@@ -107,31 +102,36 @@ def get_config():
     config.lr_scheduler_kwargs = cfg()
     config.full_bf16 = False
     config.full_fp16 = True
-    config.include_t5 = False  # for sd3
     config.train_text_encoder = True
-    config.learning_rate_te1 = 2e-6
-    config.learning_rate_te2 = 2e-6
-    config.learning_rate_te3 = 0  # for sd3
-    config.gradient_checkpointing = False
-    config.gradient_accumulation_steps = 16
+    config.learning_rate_te1 = 1e-6
+    config.learning_rate_te2 = 1e-6
+    config.gradient_checkpointing = True
+    config.gradient_accumulation_steps = 6
     config.optimizer_type = 'AdaFactor'
     config.optimizer_kwargs = cfg(
+        # AdaFactor:
         relative_step=False,
         scale_parameter=False,
         warmup_init=False,
+
+        # AdamW:
+        # weight_decay=0.03,
+        # betas=(0.9, 0.9),
+        # amsgrad=False
     )
     config.mixed_precision = 'fp16'
     config.cpu = False
 
     # Advanced Parameters
+    config.max_token_length = 225
     config.mem_eff_attn = False
     config.xformers = True
     config.diffusers_xformers = False
     config.sdpa = False
     config.clip_skip = None
-    config.noise_offset = 0
+    config.noise_offset = 0.0357
     config.multires_noise_iterations = 0
-    config.multires_noise_discount = 0.25
+    config.multires_noise_discount = 0
     config.adaptive_noise_scale = None
     config.max_grad_norm = 0.5
     config.prediction_type = 'epsilon'
@@ -141,13 +141,14 @@ def get_config():
     config.debiased_estimation_loss = False
     config.min_timestep = 0
     config.max_timestep = 1000
+    config.max_token_length = 225
     config.timestep_sampler_type = "logit_normal"
     config.timestep_sampler_kwargs = cfg(
-        mu=1.09861228867,  # log(3) for 1024x1024
+        mu=1.09861228867,  # log(3)
         sigma=1,
     )
 
-    # Custom Training Parameters
+# Custom Training Parameters
     config.data_preprocessor = get_img_md
     config.dataset_info_getter = get_dataset_info
     config.data_weight_getter = get_data_weight

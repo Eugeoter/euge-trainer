@@ -2,6 +2,7 @@ import copy
 import math
 import os
 import torch
+from typing import Literal
 from diffusers import FlowMatchEulerDiscreteScheduler, SD3Transformer2DModel
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import StableDiffusion3Pipeline
 from .t2i_trainer import T2ITrainer
@@ -11,13 +12,12 @@ from ..utils import sd3_model_utils, model_utils
 
 
 class SD3T2ITrainer(T2ITrainer):
-    revision: str = None
-    variant: str = None
     dataset_class = T2ITrainDataset
     train_state_class = SD3TrainState
     nnet_class = SD3Transformer2DModel
     pipeline_class = StableDiffusion3Pipeline
     include_t5: bool = False
+    timestep_sampler_type: Literal['sigma_sqrt', 'logit_normal', 'mode'] = "logit_normal"
 
     def load_diffusion_model(self):
         models = {}

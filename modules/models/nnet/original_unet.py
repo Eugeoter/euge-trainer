@@ -113,8 +113,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from einops import rearrange
-from ..utils import log_utils
-import logging
+from ...utils import log_utils
 logger = log_utils.get_logger(__name__)
 
 BLOCK_OUT_CHANNELS: Tuple[int] = (320, 640, 1280, 1280)

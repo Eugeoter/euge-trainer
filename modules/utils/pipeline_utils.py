@@ -74,3 +74,34 @@ def prepare_controlnet_image(
         image = torch.cat([image] * 2)
 
     return image
+
+
+def get_sd3_pipeline(
+    pretrained_model_name_or_path,
+    device: torch.device,
+    dtype: torch.dtype,
+    include_t5: bool = False,
+    cache_dir: str = None,
+    token: str = None,
+    xformers: str = True,
+):
+    from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import StableDiffusion3Pipeline
+    kwargs = {}
+    if not include_t5:
+        kwargs.update(
+            {
+                "text_encoder_3": None,
+                "tokenizer_3": None,
+            }
+        )
+    pipe = StableDiffusion3Pipeline.from_pretrained(
+        pretrained_model_name_or_path,
+        token=token,
+        cache_dir=cache_dir,
+        torch_dtype=dtype,
+        **kwargs,
+    )
+    if xformers:
+        pipe.enable_xformers_memory_efficient_attention()
+    pipe = pipe.to(device)
+    return pipe

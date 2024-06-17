@@ -203,6 +203,15 @@ def resize_if_needed(image: Union[Image.Image, np.ndarray], target_size):
     return image
 
 
+def crop_ltrb_if_needed(image: Union[Image.Image, np.ndarray], crop_ltrb):
+    if crop_ltrb != (0, 0, 0, 0):
+        if isinstance(image, Image.Image):
+            image = image.crop(crop_ltrb)
+        else:
+            image = image[crop_ltrb[1]:crop_ltrb[3], crop_ltrb[0]:crop_ltrb[2]]
+    return image
+
+
 def crop_if_needed(image: Union[Image.Image, np.ndarray], target_size, max_ar=None):
     image_size = image.size if isinstance(image, Image.Image) else (image.shape[1], image.shape[0])
     img_w, img_h = image_size
