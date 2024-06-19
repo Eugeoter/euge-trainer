@@ -20,7 +20,7 @@ from transformers import CLIPTokenizer
 from safetensors.torch import load_file, save_file
 from typing import Optional
 from . import log_utils
-from ..models.original_unet import UNet2DConditionModel
+from ..models.nnet.original_unet import UNet2DConditionModel
 
 logger = log_utils.get_logger("model")
 

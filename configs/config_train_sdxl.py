@@ -12,13 +12,21 @@ def get_config():
 
     # Main parameters
     config.pretrained_model_name_or_path = '/path/to/your/model.safetensors'
-    config.image_dirs = [
-        '/path/to/images/category_1/',
-        '/path/to/images/category_2/',
-        '/path/to/images/category_3/',
+    config.dataset_source = [
+        cfg(
+            name_or_path='/path/to/your/images',
+        ),
+        cfg(
+            name_or_path='nyanko7/danbooru2023',
+            split='original',
+            column_mapping={'png': 'image', 'jpg': 'image', 'webp': 'image'}
+        )
     ]
-    config.metadata_files = [
-        '/path/to/metadata.json',
+    config.metadata_source = [
+        '/path/to/your/metadata.json',
+        '/path/to/your/metadata.csv',
+        '/path/to/your/metadata.sqlite3',
+        '/path/to/your/txt_or_json_files/'
     ]
     config.output_dir = 'projects/my_project/'
     config.resume_from = None
@@ -148,7 +156,7 @@ def get_config():
         sigma=1,
     )
 
-# Custom Training Parameters
+    # Custom Training Parameters
     config.data_preprocessor = get_img_md
     config.dataset_info_getter = get_dataset_info
     config.data_weight_getter = get_data_weight

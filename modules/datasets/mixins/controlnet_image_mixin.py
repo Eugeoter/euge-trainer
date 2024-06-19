@@ -1,8 +1,7 @@
 import torch
-import numpy as np
 from PIL import Image
-from typing import Callable
 from torchvision import transforms
+from typing import List, Dict, Any, Callable
 from ...utils import dataset_utils
 
 
@@ -35,3 +34,14 @@ class ControlNetImageMixin(object):
             ]
         )(control_image)
         return control_image
+
+    def get_control_image_sample(self, batch: List[str], samples: Dict[str, Any]) -> Dict[str, Any]:
+        sample = dict(
+            control_images=[],
+        )
+        for i, img_key in enumerate(batch):
+            img_md = self.dataset[img_key]
+            control_image = self.get_control_image(img_md)
+            sample["control_images"].append(control_image)
+        sample["control_images"] = torch.stack(sample["control_images"], dim=0).to(memory_format=torch.contiguous_format).float()
+        return sample

@@ -14,21 +14,24 @@ def get_config():
     # config.pretrained_model_name_or_path = '/path/to/stabilityai/stable-diffusion-3-medium-diffusers/' # optional
 
     # Dataset Parameters
-    # Load from local
-    config.image_dirs = [
-        '/path/to/images/category_1/',
-        '/path/to/images/category_2/',
-        '/path/to/images/category_3/',
+    config.dataset_source = [
+        cfg(
+            name_or_path='/path/to/your/images',
+        ),
+        cfg(
+            name_or_path='nyanko7/danbooru2023',
+            split='original',
+            column_mapping={'png': 'image', 'jpg': 'image', 'webp': 'image'}
+        )
     ]
-    config.metadata_files = [
-        '/path/to/metadata.json',
+    config.metadata_source = [
+        '/path/to/your/metadata.json',
+        '/path/to/your/metadata.csv',
+        '/path/to/your/metadata.sqlite3',
+        '/path/to/your/txt_or_json_files/'
     ]
-
-    # Load from HuggingFace
-    # config.dataset_name_or_path = 'Nahrawy/VIDIT-Depth-ControlNet'
-    # config.dataset_image_column = 'image'
-    # config.dataset_control_image_column = 'depth_map'
-    # config.dataset_caption_column = 'caption'
+    config.output_dir = 'projects/my_project/'
+    config.resume_from = None
 
     # Model Parameters
     config.vae_model_name_or_path = None

@@ -1,0 +1,12 @@
+[
+    {
+        "image_path": "asserts/validation/deepfashion/img_1.jpg",
+        "conditioning_image_path": "asserts/validation/deepfashion/cond_1.jpg",
+        "caption": null
+    },
+    {
+        "image_path": "asserts/validation/deepfashion/img_2.jpg",
+        "conditioning_image_path": "asserts/validation/deepfashion/cond_2.jpg",
+        "caption": null
+    }
+]

@@ -50,9 +50,9 @@ class AspectRatioBucketMixin(object):
 
     def make_buckets(self) -> Dict[Tuple[int, int], List[str]]:
         if not self.arb:
-            return {self.get_resolution(): list(self.data.keys())}
+            return {self.get_resolution(): list(self.dataset.keys())}
         bucket_keys = {}
-        for img_key, img_md in self.data.items():
+        for img_key, img_md in self.dataset.items():
             if (bucket_size := img_md.get('bucket_size')) is not None:
                 pass
             else:

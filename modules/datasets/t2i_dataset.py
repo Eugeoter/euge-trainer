@@ -2,8 +2,11 @@ import os
 import torch
 import random
 import numpy as np
+import functools
+import operator
+from ml_collections import ConfigDict
 from PIL import Image
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Union
 from waifuset.const import IMAGE_EXTS
 from waifuset.classes import DictDataset
 from waifuset.tools import mapping
@@ -13,18 +16,15 @@ from ..utils import log_utils, dataset_utils, class_utils
 
 
 class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLatentsMixin, class_utils.FromConfigMixin):
-    metadata_files: List[str] = None
-    image_dirs: List[str] = None
-    dataset_name_or_path: str = None
-    dataset_split: str = 'train'
-    dataset_image_column: str = 'image'
-    dataset_caption_column: str = 'caption'
+    dataset_source: Union[str, List[str]]
+    metadata_source: Union[str, List[str]]
     max_retries: int = None  # infinite retries
     hf_cache_dir: str = None
     hf_token: str = None
     batch_size: int = 1
     flip_aug: bool = False
     records_cache_dir: str = None
+    max_dataset_n_workers: int = 1
     data_preprocessor: Callable = lambda self, img_md, *args, **kwargs: img_md
     dataset_info_getter: Callable = lambda self, dataset, *args, **kwargs: None
     data_weight_getter: Callable = lambda self, img_md, *args, **kwargs: 1
@@ -37,23 +37,33 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
     def setup(self):
         self.logger = log_utils.get_logger("dataset", disable=not self.accelerator.is_main_process)
         self.samplers = self.get_samplers()
-        self.data = self.load_dataset()
+        self.dataset = self.load_dataset()
         self.dataset_info = self.get_dataset_info()
-        for img_md in self.logger.tqdm(self.data.values(), desc='prepare dataset'):
-            self.load_data(img_md)
-        for img_key, img_md in list(self.data.items()):
-            if img_md.get('weight', 1) == 0:
-                del self.data[img_key]
-        self.logger.print(f"num_data_after_filtering: {len(self.data)}")
-        self.logger.print(f"num_repeats: {sum(img_md.get('weight', 1) for img_md in self.data.values())}")
+
+        if self.max_dataset_n_workers <= 1:
+            for img_md in self.logger.tqdm(self.dataset.values(), desc='prepare dataset'):
+                self.load_data(img_md)
+        else:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_dataset_n_workers) as executor:
+                futures = {executor.submit(self.load_data, img_md): img_md for img_md in self.dataset.values()}
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+
+        # filter out data with weight 0
+        for img_key, img_md in list(self.dataset.items()):
+            if img_md.get('weight', 1) <= 0:
+                del self.dataset[img_key]
+        self.logger.print(f"number of data (after filtering): {len(self.dataset)}")
+        self.logger.print(f"number of repeats: {sum(img_md.get('weight', 1) for img_md in self.dataset.values())}")
         self.buckets = self.make_buckets()
         if not self.arb:
-            self.logger.print(f"bucket_size: {self.get_resolution()}")
+            self.logger.print(f"resolution: {self.get_resolution()}")
         else:
             self.logger.print(f"buckets: {list(sorted(self.buckets.keys(), key=lambda x: x[0] * x[1]))}")
-        self.logger.print(f"num_buckets: {len(self.buckets)}")
+        self.logger.print(f"number of buckets: {len(self.buckets)}")
         self.batches = self.make_batches()
-        self.logger.print(f"num_batches: {len(self.batches)}")
+        self.logger.print(f"number pf batches: {len(self.batches)}")
 
     def get_samplers(self):
         samplers = [sampler for sampler in dir(self) if sampler.startswith('get_') and sampler.endswith('_sample') and callable(getattr(self, sampler))]
@@ -64,67 +74,94 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
 
     def load_dataset(self) -> DictDataset:
         self.logger.print(f"loading dataset...")
-        if self.metadata_files or self.image_dirs:
-            dataset = self.load_local_dataset()
-        elif self.dataset_name_or_path:
-            if self.cache_latents is True:
-                self.cache_latents = False
-                self.logger.print(log_utils.yellow("Caching latents is disabled because it is not supported for Hugging Face datasets."))
-            dataset = self.load_huggingface_dataset()
-            if not self.arb:
-                image_size = dataset[0]['image'].size
+        datasets = []
+        dataset_loaders = [
+            dataset_loader for dataset_loader in dir(self)
+            if dataset_loader.startswith('load_') and dataset_loader.endswith('_dataset') and callable(getattr(self, dataset_loader)) and dataset_loader != 'load_dataset'
+        ]
 
-                def set_image_size(img_md):
-                    img_md.setdefault('image_size', image_size)
-                    return img_md
+        # load datasets
+        with self.logger.tqdm(total=len(dataset_loaders), desc='load datasets') as pbar:
+            msgs = []
+            for dataset_loader in dataset_loaders:
+                dataset_type = dataset_loader[5:-8]
+                pbar.set_postfix(dataset=dataset_type)
+                ds = getattr(self, dataset_loader)()
+                msgs.append(f"number of rows in {dataset_type} dataset: {len(ds)}")
+                datasets.append(ds)
+                pbar.update()
+            for msg in msgs:
+                self.logger.print(msg)
 
-                dataset.apply_map(set_image_size)
-                self.logger.print(log_utils.yellow(f"Image size is fixed to {image_size} (the first image size) in the dataset."))
-        else:
-            raise ValueError("Failed to load dataset. Please provide `metadata_files`, `image_dirs` or `dataset_name_or_path`.")
-        self.logger.print(f"num_data: {len(dataset)}")
-        self.logger.print(f"dataset: {dataset}")
-        return dataset
+        # merge datasets into metaset
+        metaset: DictDataset = self.load_metadata()  # load metadata
+        metaset = metaset.sample(n=100)
+        self.logger.print(f"number of rows in metadata: {len(metaset)}")
+        for img_key, old_img_md in self.logger.tqdm(metaset.items(), desc='merge datasets to metadata'):
+            for ds in datasets:
+                if (new_img_md := ds.get(img_key)) is not None:
+                    old_img_md.update(new_img_md)
+                    if issubclass(new_img_md.__class__, old_img_md.__class__):
+                        new_img_md.update(old_img_md)
+                        metaset[img_key] = new_img_md
+        metaset.apply_map(mapping.as_posix_path, columns=('image_path', 'cache_path'))
+        metaset = metaset.subset(self.get_data_existence)
+        self.logger.print(f"dataset: {metaset}")
+        return metaset
 
-    def load_huggingface_dataset(self) -> DictDataset:
-        dataset = dataset_utils.load_huggingface_dataset(
-            self.dataset_name_or_path,
-            cache_dir=self.hf_cache_dir,
-            split=self.dataset_split,
-            primary_key='image_key',
-            column_mapping=self.get_hf_dataset_column_mapping(),
-            max_retries=self.max_retries,
-        )
-        return dataset
-
-    def get_hf_dataset_column_mapping(self):
-        return {
-            self.dataset_image_column: 'image',
-            self.dataset_caption_column: 'caption'
-        }
-
-    def load_local_dataset(self) -> DictDataset:
-        imageset = self.load_image_dataset()
-        if self.cache_latents:
-            cacheset = self.load_cache_dataset()
-            for img_key, cache_md in cacheset.items():
-                if img_key in imageset:
-                    imageset[img_key]['cache_path'] = cache_md['cache_path']
-                else:
-                    imageset[img_key] = cache_md
-        return imageset
+    def get_data_existence(self, img_md):
+        return isinstance(img_md, dataset_utils.HuggingFaceData) or os.path.exists(img_md.get('image_path', '')) or os.path.exists(img_md.get('cache_path', ''))
 
     def load_image_dataset(self) -> DictDataset:
-        imageset = dataset_utils.load_local_dataset(
-            self.metadata_files,
-            self.image_dirs,
-            tbname='metadata',
-            primary_key='image_key',
-            fp_key='image_path',
-            exts=IMAGE_EXTS,
-        )
-        self.logger.print(f"num_images: {len(imageset)}")
+        """
+        Load image dataset from `dataset_source`.
+        """
+        if isinstance(self.dataset_source, str):
+            self.dataset_source = [self.dataset_source]
+        self.dataset_source = [dict(name_or_path=source) if isinstance(source, str) else source for source in self.dataset_source]
+        imagesets = []
+        for ds_src in self.dataset_source:
+            name_or_path = ds_src.get('name_or_path')
+            if os.path.exists(name_or_path):
+                imageset = dataset_utils.load_image_directory_dataset(
+                    image_directory=name_or_path,
+                    fp_key=ds_src.get('fp_key', 'image_path'),
+                    recur=ds_src.get('recur', True),
+                    exts=ds_src.get('exts', IMAGE_EXTS),
+                )
+            else:
+                imageset = dataset_utils.load_huggingface_dataset(
+                    name_or_path=name_or_path,
+                    cache_dir=ds_src.get('cache_dir', self.hf_cache_dir),
+                    split=ds_src.get('split', 'train'),
+                    primary_key='image_key',
+                    column_mapping=ds_src.get('column_mapping', {k: 'image' for k in ('image', 'png', 'jpg', 'jpeg', 'webp', 'jfif')}),
+                    hf_token=ds_src.get('hf_token', self.hf_token),
+                    max_retries=ds_src.get('max_retries', self.max_retries),
+                )
+            imagesets.append(imageset)
+        imageset = functools.reduce(operator.add, imagesets)
         return imageset
+
+    def load_metadata(self):
+        self.logger.print(f"loading metadata...")
+        if isinstance(self.metadata_source, str):
+            self.metadata_source = [self.metadata_source]
+        self.metadata_source = [dict(name_or_path=source) if isinstance(source, str) else source for source in self.metadata_source]
+        metasets = []
+        for md_src in self.metadata_source:
+            md_file = md_src.get('name_or_path')
+            metaset = dataset_utils.load_metadata_dataset(
+                md_file,
+                fp_key=md_src.get('fp_key', 'image_path'),
+                recur=md_src.get('recur', True),
+                exts=md_src.get('exts', IMAGE_EXTS),
+                tbname=md_src.get('tbname', 'metadata'),
+                primary_key='image_key',
+            )
+            metasets.append(metaset)
+        metaset = functools.reduce(lambda x, y: x + y, metasets)
+        return metaset
 
     def get_dataset_info(self) -> Any:
         return self.dataset_info_getter(self)
@@ -141,9 +178,9 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
                     batch = img_keys[i:i+self.batch_size]
                     batches.append(batch)
         else:
-            img_keys = list(self.data.keys())
+            img_keys = list(self.dataset.keys())
             batches = []
-            for i in range(0, len(self.data), self.batch_size):
+            for i in range(0, len(self.dataset), self.batch_size):
                 batch = img_keys[i:i+self.batch_size]
                 batches.append(batch)
         return batches
@@ -168,7 +205,7 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
             is_flipped=[],
         )
         for img_key in batch:
-            img_md = self.data[img_key]
+            img_md = self.dataset[img_key]
             is_flipped = self.flip_aug and random.random() > 0.5
             cache = self.get_cache(img_md)
             latents = cache.get('latents')

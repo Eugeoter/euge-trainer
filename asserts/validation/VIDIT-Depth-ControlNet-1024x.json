@@ -1,0 +1,16 @@
+[
+    {
+        "image_path": "asserts/validation/VIDIT-Depth-ControlNet/img_1.png",
+        "control_image": "asserts/validation/VIDIT-Depth-ControlNet/cond_1.png",
+        "prompt": "a wooden bridge in the middle of a field",
+        "width": 1024,
+        "height": 1024
+    },
+    {
+        "image_path": "asserts/validation/VIDIT-Depth-ControlNet/img_2.png",
+        "control_image": "asserts/validation/VIDIT-Depth-ControlNet/cond_2.png",
+        "prompt": "a stone tower on a rocky island",
+        "width": 1024,
+        "height": 1024
+    }
+]

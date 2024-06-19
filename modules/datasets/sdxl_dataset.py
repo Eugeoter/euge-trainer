@@ -11,7 +11,7 @@ class SDXLTrainDataset(T2ITrainDataset):
             crop_top_lefts=[],
         )
         for i, img_key in enumerate(batch):
-            img_md = self.data[img_key]
+            img_md = self.dataset[img_key]
             original_size = img_md['original_size'] or img_md['image_size']
             target_size = img_md['bucket_size']
             crop_ltrb = img_md.get('crop_ltrb') or (0, 0, target_size[0], target_size[1])

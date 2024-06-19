@@ -1,8 +1,10 @@
 import os
 import torch
 import numpy as np
+import operator
+import functools
 from typing import List, Tuple, Dict, Any
-from waifuset.classes import Data
+from waifuset.classes import Data, DictDataset
 from ...utils import dataset_utils
 
 
@@ -16,14 +18,24 @@ class CacheLatentsMixin(object):
     keep_cached_latents_in_memory: bool = True
 
     def load_cache_dataset(self):
-        cacheset = dataset_utils.load_local_dataset(
-            self.metadata_files,
-            self.image_dirs,
-            fp_key='cache_path',
-            tbname='metadata',
-            exts='.npz',
-        )
-        self.logger.print(f"num_caches: {len(cacheset)}")
+        cache_source = self.dataset_source.copy()
+        if isinstance(cache_source, str):
+            cache_source = [cache_source]
+        cache_source = [dict(name_or_path=source) if isinstance(source, str) else source for source in cache_source]
+        cachesets = []
+        for ds_src in cache_source:
+            name_or_path = ds_src.get('name_or_path')
+            if os.path.exists(name_or_path):
+                cacheset = dataset_utils.load_image_directory_dataset(
+                    image_directory=name_or_path,
+                    fp_key=ds_src.get('cache_fp_key', 'cache_path'),
+                    recur=ds_src.get('recur', True),
+                    exts='.npz',
+                )
+                cachesets.append(cacheset)
+        if not cachesets:
+            return DictDataset.from_dict({})
+        cacheset = functools.reduce(operator.add, cachesets)
         return cacheset
 
     def cache_batch_latents(self, vae, empty_cache=False):
@@ -40,7 +52,7 @@ class CacheLatentsMixin(object):
         self.accelerator.wait_for_everyone()
 
     def make_uncached_batches(self):
-        img_mds = list(self.data.values())
+        img_mds = list(self.dataset.values())
         img_mds.sort(key=lambda img_md: img_md['bucket_size'])
         batches = []
         batch = []

@@ -5,13 +5,33 @@ import cv2
 import os
 import numpy as np
 import functools
+import huggingface_hub.utils
+import requests
+from ml_collections import ConfigDict
 from PIL import Image, ExifTags
-from typing import Tuple, Union, Literal
+from typing import Tuple, Union, Literal, List
 from torchvision import transforms
 from waifuset.classes import DictDataset, DictData
-from ..utils import log_utils, model_utils
+from ..utils import log_utils
 
 logger = log_utils.get_logger("dataset")
+NETWORK_EXCEPTIONS = (huggingface_hub.utils._errors.HfHubHTTPError, ConnectionError, requests.exceptions.HTTPError)
+IMAGE_TRANSFORMS = transforms.Compose(
+    [
+        transforms.ToTensor(),
+        transforms.Normalize([0.5], [0.5]),
+    ]
+)
+
+
+def cfg(**kwargs):
+    return ConfigDict(initial_dictionary=kwargs)
+
+
+def patch_image_key(dataset):
+    for img_key, img_md in dataset.items():
+        img_md['image_key'] = img_key
+    return dataset
 
 
 def load_local_dataset(metadata_files, image_dirs, fp_key='image_path', recur=True, tbname='metadata', primary_key='image_key', exts=None, **kwargs) -> DictDataset:
@@ -26,27 +46,33 @@ def load_local_dataset(metadata_files, image_dirs, fp_key='image_path', recur=Tr
     )
     metaset_kwargs.update(kwargs)
     if metadata_files:
+        # load metaset from metadata files
         metaset: DictDataset = functools.reduce(lambda x, y: x + y, [
             DictDataset.from_dataset(AutoDataset(mdfile, **metaset_kwargs))
             for mdfile in metadata_files
         ])
         if image_dirs:
+            # load dirset from image dirs
             dirset = functools.reduce(lambda x, y: x + y, [
                 DirectoryDataset.from_disk(source, **metaset_kwargs)
                 for source in image_dirs
             ])
+            # set image_path in metaset to the path in dirset
             metaset.apply_map(mapping.redirect_columns, columns=[fp_key], tarset=dirset)
+        # filter out the data that doesn't exist or without image_path
         metaset = metaset.subset(lambda x: fp_key in x and os.path.exists(x[fp_key]))
+        # convert windows path to posix path (for linux)
         metaset.apply_map(mapping.as_posix_path, columns=[fp_key])
     elif image_dirs:
         from waifuset.classes.data.data_utils import read_attrs
+        # read metaset (= dirset) from image dirs
         metaset = functools.reduce(lambda x, y: x + y, [
             DirectoryDataset.from_disk(source, **metaset_kwargs)
             for source in image_dirs
         ])
         metaset = DictDataset.from_dataset(metaset)
 
-        if fp_key == 'image_path':
+        if fp_key == 'image_path':  # read metadata of image data
             def read_data_attr(img_md):
                 attrs = read_attrs(img_md[fp_key])
                 img_md.update(attrs)
@@ -54,7 +80,7 @@ def load_local_dataset(metadata_files, image_dirs, fp_key='image_path', recur=Tr
             metaset.apply_map(read_data_attr)
     else:
         raise ValueError("metadata_files or image_dirs must be provided.")
-
+    metaset.apply_map(mapping.patch_image_key)
     return metaset
 
 
@@ -85,7 +111,7 @@ class HuggingFaceData(DictData):
         return super().__getitem__(key)
 
 
-def load_huggingface_dataset(name_or_path, cache_dir=None, split='train', primary_key='image_key', column_mapping=None, max_retries=None) -> DictDataset:
+def load_huggingface_dataset(name_or_path, cache_dir=None, split='train', primary_key='image_key', column_mapping=None, hf_token=None, max_retries=None) -> DictDataset:
     r"""
     Load dataset from HuggingFace and convert it to DictDataset.
     """
@@ -97,23 +123,75 @@ def load_huggingface_dataset(name_or_path, cache_dir=None, split='train', primar
                 name_or_path,
                 cache_dir=cache_dir,
                 split=split,
+                token=hf_token,
             )
             break
-        except model_utils.NETWORK_EXCEPTIONS as e:
+        except NETWORK_EXCEPTIONS:
             logger.print(log_utils.yellow(f"Connection error when downloading dataset `{name_or_path}` from HuggingFace. Retrying..."))
             if max_retries is not None and retries >= max_retries:
                 raise
             retries += 1
             pass
 
+    if '__key__' in hfset.column_names:
+        column_mapping['__key__'] = primary_key
     if column_mapping:
         hfset = hfset.remove_columns([k for k in hfset.column_names if k not in column_mapping])
         hfset = hfset.rename_columns({k: v for k, v in column_mapping.items() if k != v and k in hfset.column_names})
     dic = {}
-    for index in range(len(hfset)):
-        key = str(index)
-        dic[key] = HuggingFaceData(hfset, index=index, **{primary_key: key})
+    if primary_key not in hfset.column_names:
+        for index in range(len(hfset)):
+            img_key = str(index)
+            dic[img_key] = HuggingFaceData(hfset, index=index, **{primary_key: img_key})
+    else:
+        for index, img_key in enumerate(hfset[primary_key]):
+            dic[img_key] = HuggingFaceData(hfset, index=index, **{primary_key: img_key})
     return DictDataset.from_dict(dic)
+
+
+def load_image_directory_dataset(
+    image_directory: List[str],
+    fp_key='image_path',
+    recur=True,
+    exts=None,
+    **kwargs,
+):
+    from waifuset.classes import DirectoryDataset
+    dirset = DirectoryDataset.from_disk(image_directory, fp_key=fp_key, recur=recur, exts=exts, **kwargs)
+    dirset = patch_image_key(dirset)
+    return dirset
+
+
+def load_metadata_dataset(
+    metadata_file: str,
+    fp_key='image_path',
+    recur=True,
+    exts=None,
+    tbname='metadata',
+    primary_key='image_key',
+    **kwargs,
+):
+    from waifuset.classes import AutoDataset, DictDataset, DirectoryDataset
+    metaset = AutoDataset(
+        metadata_file,
+        fp_key=fp_key,
+        recur=recur,
+        tbname=tbname,
+        primary_key=primary_key,
+        exts=exts,
+        **kwargs,
+    )
+    if isinstance(metaset, DirectoryDataset):  # read metadata from txt or json files
+        from waifuset.classes.data.data_utils import read_attrs
+
+        def read_data_attr(img_md):
+            attrs = read_attrs(img_md[fp_key])
+            img_md.update(attrs)
+            return img_md
+        metaset.apply_map(read_data_attr)
+
+    metaset = patch_image_key(metaset)
+    return DictDataset.from_dataset(metaset)
 
 
 def load_image(image_path, type: Literal['pil', 'numpy'] = 'numpy', mode: str = 'RGB'):
@@ -123,13 +201,6 @@ def load_image(image_path, type: Literal['pil', 'numpy'] = 'numpy', mode: str = 
     if type == 'numpy':
         image = np.array(image, np.uint8)  # (H, W, C)
     return image
-
-
-def make_canny(image: np.ndarray, thres_1=0, thres_2=75):
-    gray_img = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred_img = cv2.GaussianBlur(gray_img, (5, 5), 0)
-    canny_edges = cv2.Canny(blurred_img, thres_1, thres_2)
-    return canny_edges
 
 
 def rotate_image_straight(image: Image) -> Image:
@@ -151,15 +222,14 @@ def rotate_image_straight(image: Image) -> Image:
     return image
 
 
-def fill_transparency(image, bg_color=(255, 255, 255)):
+def fill_transparency(image: Union[Image.Image, np.ndarray], bg_color: Tuple[int, int, int] = (255, 255, 255)):
     r"""
     Fill the transparent part of an image with a background color.
     Please pay attention that this function doesn't change the image type.
     """
     if isinstance(image, Image.Image):
         # Only process if image has transparency
-        if image.mode in ('RGBA', 'LA') or \
-                (image.mode == 'P' and 'transparency' in image.info):
+        if image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info):
             # Need to convert to RGBA if LA format due to a bug in PIL (http://stackoverflow.com/a/1963146)
             alpha = image.convert('RGBA').split()[-1]
 
@@ -169,7 +239,6 @@ def fill_transparency(image, bg_color=(255, 255, 255)):
             bg = Image.new("RGBA", image.size, bg_color + (255,))
             bg.paste(image, mask=alpha)
             return bg
-
         else:
             return image
     elif isinstance(image, np.ndarray):
@@ -182,7 +251,7 @@ def fill_transparency(image, bg_color=(255, 255, 255)):
             return image
 
 
-def convert_to_rgb(image, bg_color=(255, 255, 255)):
+def convert_to_rgb(image: Union[Image.Image, np.ndarray], bg_color=(255, 255, 255)):
     r"""
     Convert an image to RGB mode and fix transparency conversion if needed.
     """
@@ -193,12 +262,12 @@ def convert_to_rgb(image, bg_color=(255, 255, 255)):
         return image[:, :, :3]
 
 
-def resize_if_needed(image: Union[Image.Image, np.ndarray], target_size):
+def resize_if_needed(image: Union[Image.Image, np.ndarray], target_size: Tuple[int, int]):
     if isinstance(image, Image.Image):
-        if image.size[0] != target_size[0] or image.size[1] != target_size[1]:
+        if image.width != target_size[0] or image.height != target_size[1]:
             image = image.resize(target_size, Image.Resampling.LANCZOS)
-    elif isinstance(image, np.ndarray):
-        if image.shape[0] != target_size[1] or image.shape[1] != target_size[0]:
+    elif isinstance(image, np.ndarray):  # (H, W, C)
+        if image.shape[1] != target_size[0] or image.shape[0] != target_size[1]:
             image = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
     return image
 
@@ -277,14 +346,6 @@ def convert_size_if_needed(size: Union[str, Tuple[int, int]]):
     if isinstance(size, str):
         size = tuple(map(int, size.split("x")))
     return size
-
-
-IMAGE_TRANSFORMS = transforms.Compose(
-    [
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ]
-)
 
 
 def aspect_ratio_diff(size_1: Tuple[int, int], size_2: Tuple[int, int]):

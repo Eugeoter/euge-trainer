@@ -383,26 +383,23 @@ def get_input_ids(caption, tokenizer, max_token_length):
 
     if max_token_length > tokenizer.model_max_length:
         input_ids = input_ids.squeeze(0)
-        iids_list = []
+        ids_list = []
         if tokenizer.pad_token_id == tokenizer.eos_token_id:
             # v1
             # 77以上の時は "<BOS> .... <EOS> <EOS> <EOS>" でトータル227とかになっているので、"<BOS>...<EOS>"の三連に変換する
             # 1111氏のやつは , で区切る、とかしているようだが　とりあえず単純に
-            for i in range(
-                1, max_token_length - tokenizer.model_max_length +
-                    2, tokenizer.model_max_length - 2
-            ):  # (1, 152, 75)
+            for i in range(0, max_token_length + 2 - tokenizer.model_max_length + 2, tokenizer.model_max_length - 2):  # (1, 152, 75)
                 ids_chunk = (
                     input_ids[0].unsqueeze(0),
                     input_ids[i: i + tokenizer.model_max_length - 2],
                     input_ids[-1].unsqueeze(0),
                 )
                 ids_chunk = torch.cat(ids_chunk)
-                iids_list.append(ids_chunk)
+                ids_list.append(ids_chunk)
         else:
             # v2 or SDXL
             # 77以上の時は "<BOS> .... <EOS> <PAD> <PAD>..." でトータル227とかになっているので、"<BOS>...<EOS> <PAD> <PAD> ..."の三連に変換する
-            for i in range(1, max_token_length - tokenizer.model_max_length + 2, tokenizer.model_max_length - 2):
+            for i in range(0, max_token_length + 2 - tokenizer.model_max_length + 2, tokenizer.model_max_length - 2):
                 ids_chunk = (
                     input_ids[0].unsqueeze(0),  # BOS
                     input_ids[i: i + tokenizer.model_max_length - 2],
@@ -418,9 +415,9 @@ def get_input_ids(caption, tokenizer, max_token_length):
                 if ids_chunk[1] == tokenizer.pad_token_id:
                     ids_chunk[1] = tokenizer.eos_token_id
 
-                iids_list.append(ids_chunk)
+                ids_list.append(ids_chunk)
 
-        input_ids = torch.stack(iids_list)  # 3,77
+        input_ids = torch.stack(ids_list)  # 3,77
         return input_ids
 
 
