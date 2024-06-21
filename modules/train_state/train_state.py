@@ -29,6 +29,7 @@ class TrainState(class_utils.FromConfigMixin):
     save_train_state: bool = True
     save_every_n_steps: int = None
     save_every_n_epochs: int = 1
+    save_at_first: bool = False
     save_on_train_end: bool = True
     save_on_keyboard_interrupt: bool = False
     save_on_exception: bool = False
@@ -164,6 +165,7 @@ class TrainState(class_utils.FromConfigMixin):
         do_save |= bool(on_step_end and self.global_step and self.save_every_n_steps and self.global_step % self.save_every_n_steps == 0)
         do_save |= bool(on_epoch_end and self.epoch and self.save_every_n_epochs and self.epoch % self.save_every_n_epochs == 0)
         do_save |= bool(on_train_end)
+        do_save |= bool(self.save_at_first and self.global_step == 0)
         do_save &= bool(self.save_model or self.save_train_state)
         if do_save:
             self.accelerator.wait_for_everyone()

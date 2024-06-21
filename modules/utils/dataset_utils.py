@@ -34,6 +34,20 @@ def patch_image_key(dataset):
     return dataset
 
 
+def accumulate_datasets(datasets):
+    pivotset, datasets = datasets[0], datasets[1:]
+    for ds in datasets:
+        for img_key, new_img_md in ds.items():
+            if (old_img_md := pivotset.get(img_key)) is not None:
+                old_img_md.update(new_img_md)
+                if issubclass(new_img_md.__class__, old_img_md.__class__):
+                    new_img_md.update(old_img_md)
+                    pivotset[img_key] = new_img_md
+            else:
+                pivotset[img_key] = new_img_md
+    return pivotset
+
+
 def load_local_dataset(metadata_files, image_dirs, fp_key='image_path', recur=True, tbname='metadata', primary_key='image_key', exts=None, **kwargs) -> DictDataset:
     from waifuset.classes import AutoDataset, DirectoryDataset
     from waifuset.tools import mapping

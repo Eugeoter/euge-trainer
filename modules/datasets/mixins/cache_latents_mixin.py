@@ -3,9 +3,12 @@ import torch
 import numpy as np
 import operator
 import functools
+import copy
 from typing import List, Tuple, Dict, Any
 from waifuset.classes import Data, DictDataset
-from ...utils import dataset_utils
+from ...utils import dataset_utils, log_utils
+
+logger = log_utils.get_logger('dataset')
 
 
 class CacheLatentsMixin(object):
@@ -18,24 +21,21 @@ class CacheLatentsMixin(object):
     keep_cached_latents_in_memory: bool = True
 
     def load_cache_dataset(self):
-        cache_source = self.dataset_source.copy()
-        if isinstance(cache_source, str):
-            cache_source = [cache_source]
-        cache_source = [dict(name_or_path=source) if isinstance(source, str) else source for source in cache_source]
+        self.cache_source = self.parse_source_input(copy.deepcopy(self.dataset_source))
         cachesets = []
-        for ds_src in cache_source:
-            name_or_path = ds_src.get('name_or_path')
+        for src in self.cache_source:
+            name_or_path = src.get('name_or_path')
             if os.path.exists(name_or_path):
                 cacheset = dataset_utils.load_image_directory_dataset(
                     image_directory=name_or_path,
-                    fp_key=ds_src.get('cache_fp_key', 'cache_path'),
-                    recur=ds_src.get('recur', True),
+                    fp_key=src.get('cache_fp_key', 'cache_path'),
+                    recur=src.get('recur', True),
                     exts='.npz',
                 )
                 cachesets.append(cacheset)
         if not cachesets:
             return DictDataset.from_dict({})
-        cacheset = functools.reduce(operator.add, cachesets)
+        cacheset = dataset_utils.accumulate_datasets(cachesets)
         return cacheset
 
     def cache_batch_latents(self, vae, empty_cache=False):
@@ -59,6 +59,8 @@ class CacheLatentsMixin(object):
         for img_md in img_mds:
             if self.check_cache_validity:
                 cache = self.get_cache(img_md['image_key'])
+                if cache is None:  # not support cache
+                    continue
                 latents = cache.get('latents')
                 if self.keep_cached_latents_in_memory and latents is not None:
                     img_md.update(cache)
@@ -82,6 +84,8 @@ class CacheLatentsMixin(object):
             return {'latents': latents}
         elif (cache_path := img_md.get('cache_path')) and os.path.exists(cache_path):
             return load_latents_from_disk(cache_path, dtype=self.latents_dtype, is_main_process=self.accelerator.is_main_process)
+        elif isinstance(img_md, dataset_utils.HuggingFaceData):  # not support cache
+            return None
         else:
             return {}
 
@@ -100,8 +104,8 @@ def open_cache(cache_path, mmap_mode=None, is_main_process=True):
             import shutil
             backup_path = str(cache_path) + '.bak'
             shutil.move(str(cache_path), backup_path)
-            print(f"remove corrupted cache file: {os.path.abspath(cache_path)}")
-            print(f"  error: {e}")
+            logger.print(log_utils.red(f"remove corrupted cache file: {os.path.abspath(cache_path)}"))
+            logger.print(log_utils.red(f"  error: {e}"))
         return None
 
 

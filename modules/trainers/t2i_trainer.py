@@ -506,9 +506,6 @@ class T2ITrainer(class_utils.FromConfigMixin):
         else:
             with torch.no_grad():
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
-                if torch.any(torch.isnan(latents)):
-                    self.pbar.write("NaN found in latents, replacing with zeros")
-                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
         latents *= self.vae_scale_factor
 
         input_ids = torch.stack([train_utils.get_input_ids(caption, self.tokenizer, max_token_length=self.max_token_length) for caption in batch['captions']], dim=0)
@@ -538,6 +535,7 @@ class T2ITrainer(class_utils.FromConfigMixin):
         return loss
 
     def train_loop(self):
+        self.train_state.save()  # on train start
         self.train_state.sample()  # on train start
         while self.train_state.epoch < self.num_train_epochs:
             if self.accelerator.is_main_process:

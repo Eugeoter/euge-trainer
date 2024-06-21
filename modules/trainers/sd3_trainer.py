@@ -16,7 +16,7 @@ class SD3T2ITrainer(T2ITrainer):
     train_state_class = SD3TrainState
     nnet_class = SD3Transformer2DModel
     pipeline_class = StableDiffusion3Pipeline
-    include_t5: bool = False
+    dropout_t5: bool = True
     timestep_sampler_type: Literal['sigma_sqrt', 'logit_normal', 'mode'] = "logit_normal"
 
     def load_diffusion_model(self):
@@ -43,7 +43,7 @@ class SD3T2ITrainer(T2ITrainer):
                 dtype=torch.float16,
                 cache_dir=self.hf_cache_dir,
                 nnet_class=self.nnet_class,
-                include_t5=self.include_t5,
+                dropout_t5=self.dropout_t5,
                 max_retries=self.max_retries,
             )
         models.update(models_)
@@ -94,7 +94,7 @@ class SD3T2ITrainer(T2ITrainer):
         training_models.extend(training_models_)
         params_to_optimize.extend(params_to_optimize_)
 
-        if self.include_t5:
+        if not self.dropout_t5:
             (
                 training_models_,
                 params_to_optimize_,
@@ -135,7 +135,7 @@ class SD3T2ITrainer(T2ITrainer):
         return sigma
 
     def get_train_state(self):
-        train_state = self.train_state_class.from_config(
+        return self.train_state_class.from_config(
             self.config,
             self.accelerator,
             pipeline_class=self.pipeline_class,
@@ -149,18 +149,16 @@ class SD3T2ITrainer(T2ITrainer):
             noise_scheduler=self.noise_scheduler,
             vae=self.vae,
         )
-        train_state.resume()
-        return train_state
 
     def _print_start_training_message(self):
         super()._print_start_training_message()
         self.logger.print(f"  train nnet: {self.train_nnet} | learning rate: {self.learning_rate_nnet}")
         self.logger.print(f"  train text encoder 1: {self.train_text_encoder1} | learning rate: {self.learning_rate_te1}")
         self.logger.print(f"  train text encoder 2: {self.train_text_encoder2} | learning rate: {self.learning_rate_te2}")
-        if self.include_t5:
+        if not self.dropout_t5:
             self.logger.print(f"  train text encoder 3: {self.train_text_encoder3} | learning rate: {self.learning_rate_te3}")
         else:
-            self.logger.print("  text encoder 3 is not included")
+            self.logger.print("  text encoder 3 dropped")
 
     def get_timesteps(self, latents):
         b_size = latents.shape[0]
@@ -187,9 +185,6 @@ class SD3T2ITrainer(T2ITrainer):
         else:
             with torch.no_grad():
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
-                if torch.any(torch.isnan(latents)):
-                    self.pbar.write("NaN found in latents, replacing with zeros")
-                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
         latents *= self.vae_scale_factor
 
         with torch.set_grad_enabled(self.train_text_encoder):

@@ -117,9 +117,6 @@ class SDXLT2ITrainer(T2ITrainer):
         else:
             with torch.no_grad():
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
-                if torch.any(torch.isnan(latents)):
-                    self.pbar.write("NaN found in latents, replacing with zeros")
-                    latents = torch.where(torch.isnan(latents), torch.zeros_like(latents), latents)
         latents *= self.vae_scale_factor
 
         input_ids1 = torch.stack([train_utils.get_input_ids(caption, self.tokenizer1, max_token_length=self.max_token_length) for caption in batch['captions']], dim=0)

@@ -16,17 +16,17 @@ def get_config():
         cfg(
             name_or_path='/path/to/your/images',
         ),
-        cfg(
-            name_or_path='nyanko7/danbooru2023',
-            split='original',
-            column_mapping={'png': 'image', 'jpg': 'image', 'webp': 'image'}
-        )
+        # cfg(
+        #     name_or_path='some/repo_id',
+        #     split='train',
+        #     column_mapping={'png': 'image', 'jpg': 'image', 'webp': 'image'}
+        # )
     ]
     config.metadata_source = [
         '/path/to/your/metadata.json',
-        '/path/to/your/metadata.csv',
-        '/path/to/your/metadata.sqlite3',
-        '/path/to/your/txt_or_json_files/'
+        # '/path/to/your/metadata.csv',
+        # '/path/to/your/metadata.sqlite3',
+        # '/path/to/your/txt_or_json_files/'
     ]
     config.output_dir = 'projects/my_project/'
     config.resume_from = None

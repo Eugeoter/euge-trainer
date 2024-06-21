@@ -4,7 +4,7 @@ import random
 import numpy as np
 import functools
 import operator
-from ml_collections import ConfigDict
+from pathlib import Path
 from PIL import Image
 from typing import List, Callable, Dict, Any, Union
 from waifuset.const import IMAGE_EXTS
@@ -72,6 +72,17 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
         samplers.insert(0, samplers.pop(samplers.index(self.get_t2i_sample)))
         return samplers
 
+    def get_fp_keys(self):
+        if isinstance(self.dataset_source, str):
+            self.dataset_source = [self.dataset_source]
+        self.dataset_source = [dict(name_or_path=source) if isinstance(source, str) else source for source in self.dataset_source]
+        fp_keys = []
+        for ds_src in self.dataset_source:
+            if (fp_key := ds_src.get('fp_key')) is not None:
+                fp_keys.append(fp_key)
+        fp_keys.append('cache_path')
+        return fp_keys
+
     def load_dataset(self) -> DictDataset:
         self.logger.print(f"loading dataset...")
         datasets = []
@@ -90,64 +101,67 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
                 msgs.append(f"number of rows in {dataset_type} dataset: {len(ds)}")
                 datasets.append(ds)
                 pbar.update()
+                # self.logger.print(f"{dataset_type} dataset:\n{ds}")
             for msg in msgs:
                 self.logger.print(msg)
 
         # merge datasets into metaset
         metaset: DictDataset = self.load_metadata()  # load metadata
-        metaset = metaset.sample(n=100)
         self.logger.print(f"number of rows in metadata: {len(metaset)}")
-        for img_key, old_img_md in self.logger.tqdm(metaset.items(), desc='merge datasets to metadata'):
-            for ds in datasets:
-                if (new_img_md := ds.get(img_key)) is not None:
-                    old_img_md.update(new_img_md)
-                    if issubclass(new_img_md.__class__, old_img_md.__class__):
-                        new_img_md.update(old_img_md)
-                        metaset[img_key] = new_img_md
-        metaset.apply_map(mapping.as_posix_path, columns=('image_path', 'cache_path'))
+        metaset = dataset_utils.accumulate_datasets([metaset] + datasets)
+        metaset.apply_map(mapping.as_posix_path, columns=self.get_fp_keys())
+        # self.logger.print(f"metaset (before filtering):\n{metaset}")
         metaset = metaset.subset(self.get_data_existence)
-        self.logger.print(f"dataset: {metaset}")
+        self.logger.print(f"dataset:\n{metaset}")
         return metaset
 
     def get_data_existence(self, img_md):
         return isinstance(img_md, dataset_utils.HuggingFaceData) or os.path.exists(img_md.get('image_path', '')) or os.path.exists(img_md.get('cache_path', ''))
 
+    def parse_source_input(self, source):
+        if source is None:
+            return []
+        if not isinstance(source, list):
+            source = [source]
+        source = [dict(name_or_path=src) if isinstance(src, (str, Path)) else src for src in source]
+        return source
+
     def load_image_dataset(self) -> DictDataset:
-        """
+        r"""
         Load image dataset from `dataset_source`.
         """
-        if isinstance(self.dataset_source, str):
-            self.dataset_source = [self.dataset_source]
-        self.dataset_source = [dict(name_or_path=source) if isinstance(source, str) else source for source in self.dataset_source]
+        self.dataset_source = self.parse_source_input(self.dataset_source)
+        if not self.dataset_source:
+            return DictDataset.from_dict({})
         imagesets = []
-        for ds_src in self.dataset_source:
-            name_or_path = ds_src.get('name_or_path')
+        for src in self.dataset_source:
+            name_or_path = src.get('name_or_path')
             if os.path.exists(name_or_path):
                 imageset = dataset_utils.load_image_directory_dataset(
                     image_directory=name_or_path,
-                    fp_key=ds_src.get('fp_key', 'image_path'),
-                    recur=ds_src.get('recur', True),
-                    exts=ds_src.get('exts', IMAGE_EXTS),
+                    fp_key=src.get('fp_key', 'image_path'),
+                    recur=src.get('recur', True),
+                    exts=src.get('exts', IMAGE_EXTS),
                 )
             else:
                 imageset = dataset_utils.load_huggingface_dataset(
                     name_or_path=name_or_path,
-                    cache_dir=ds_src.get('cache_dir', self.hf_cache_dir),
-                    split=ds_src.get('split', 'train'),
+                    cache_dir=src.get('cache_dir', self.hf_cache_dir),
+                    split=src.get('split', 'train'),
                     primary_key='image_key',
-                    column_mapping=ds_src.get('column_mapping', {k: 'image' for k in ('image', 'png', 'jpg', 'jpeg', 'webp', 'jfif')}),
-                    hf_token=ds_src.get('hf_token', self.hf_token),
-                    max_retries=ds_src.get('max_retries', self.max_retries),
+                    column_mapping=src.get('column_mapping', {k: 'image' for k in ('image', 'png', 'jpg', 'jpeg', 'webp', 'jfif')}),
+                    hf_token=src.get('hf_token', self.hf_token),
+                    max_retries=src.get('max_retries', self.max_retries),
                 )
             imagesets.append(imageset)
-        imageset = functools.reduce(operator.add, imagesets)
+        imageset = dataset_utils.accumulate_datasets(imagesets)
         return imageset
 
     def load_metadata(self):
         self.logger.print(f"loading metadata...")
-        if isinstance(self.metadata_source, str):
-            self.metadata_source = [self.metadata_source]
-        self.metadata_source = [dict(name_or_path=source) if isinstance(source, str) else source for source in self.metadata_source]
+        self.metadata_source = self.parse_source_input(self.metadata_source)
+        if not self.metadata_source:
+            return DictDataset.from_dict({})
         metasets = []
         for md_src in self.metadata_source:
             md_file = md_src.get('name_or_path')
@@ -160,7 +174,7 @@ class T2ITrainDataset(torch.utils.data.Dataset, AspectRatioBucketMixin, CacheLat
                 primary_key='image_key',
             )
             metasets.append(metaset)
-        metaset = functools.reduce(lambda x, y: x + y, metasets)
+        metaset = dataset_utils.accumulate_datasets(metasets)
         return metaset
 
     def get_dataset_info(self) -> Any:

@@ -1,11 +1,16 @@
 import torch
+import os
+import functools
+import operator
 from PIL import Image
 from torchvision import transforms
 from typing import List, Dict, Any, Callable
+from waifuset.const import IMAGE_EXTS
 from ...utils import dataset_utils
 
 
 class ControlNetImageMixin(object):
+    control_image_source: List[Dict[str, Any]]
     control_image_getter: Callable = lambda img_md, *args, **kwargs: None
     keep_control_image_in_memory: bool = False
 
