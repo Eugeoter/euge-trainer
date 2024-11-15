@@ -1,4 +1,4 @@
-from typing import Any, List, Tuple
+from typing import Any
 from ml_collections import ConfigDict
 
 
@@ -13,19 +13,14 @@ def get_config():
     config.pretrained_model_name_or_path = '/path/to/your/model.safetensors'
     config.dataset_source = [
         cfg(
+            name_or_path='/path/to/your/metadata.json',  # or csv, or any other supported format
+        ),
+        cfg(
             name_or_path='/path/to/your/images',
         ),
         # cfg(
-        #     name_or_path='some/repo_id',
-        #     split='train',
-        #     column_mapping={'png': 'image', 'jpg': 'image', 'webp': 'image'}
+        #     name_or_path='repo_id',
         # )
-    ]
-    config.metadata_source = [
-        '/path/to/your/metadata.json',
-        # '/path/to/your/metadata.csv',
-        # '/path/to/your/metadata.sqlite3',
-        # '/path/to/your/txt_or_json_files/'
     ]
     config.output_dir = 'projects/my_project/'
     config.resume_from = None
@@ -72,6 +67,7 @@ def get_config():
     config.save_train_state = True
     config.save_every_n_epochs = 1
     config.save_every_n_steps = 500
+    config.save_at_first = False
     config.save_on_train_end = True
     config.save_on_keyboard_interrupt = False
     config.save_on_exception = False

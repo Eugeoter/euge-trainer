@@ -15,6 +15,25 @@ class FromConfigMixin(object):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    def get_config(self):
+        return self.config
+
+
+class SubModuleMixin(FromConfigMixin):
+    @classmethod
+    def from_module(cls, module, **kwargs):
+        return cls(module, **kwargs)
+
+    def __init__(self, module, **kwargs):
+        self.module = module
+        for attr_name in dir(self.module):
+            attr = getattr(self.module, attr_name)
+            if not attr_name.startswith('__') and not callable(attr) and hasattr(self, attr_name):
+                setattr(self, attr_name, attr)
+
+    def __getattr__(self, name):
+        return getattr(self.module, name)
+
 
 def get_full_type_hints(cls):
     vars = get_type_hints(cls)

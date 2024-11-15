@@ -1,16 +1,20 @@
 import torch
 import os
-import numpy as np
+import wandb
 from PIL import Image
-from . import log_utils
+from pathlib import Path
+from waifuset import logging
+from . import dataset_utils, device_utils
 
-logger = log_utils.get_logger("eval")
+logger = logging.get_logger("eval")
 
 # scheduler:
 SCHEDULER_LINEAR_START = 0.00085
 SCHEDULER_LINEAR_END = 0.0120
 SCHEDULER_TIMESTEPS = 1000
 SCHEDLER_SCHEDULE = "scaled_linear"
+
+DEFAULT_SAMPLE_NAME = 'image'
 
 
 ALL_SAMPLERS = [
@@ -34,7 +38,8 @@ ALL_SAMPLERS = [
 ]
 
 
-def get_sampler(sample_sampler):
+def get_sampler(sample_sampler, **sampler_kwargs):
+    sample_sampler = sample_sampler.lower().replace(' ', '_')
     # schedulerを用意する
     sched_init_args = {}
     if sample_sampler == "ddim":
@@ -74,6 +79,7 @@ def get_sampler(sample_sampler):
     else:
         scheduler_cls = DDIMScheduler
 
+    sched_init_args.update(sampler_kwargs)
     scheduler = scheduler_cls(
         num_train_timesteps=SCHEDULER_TIMESTEPS,
         beta_start=SCHEDULER_LINEAR_START,
@@ -90,7 +96,7 @@ def get_sampler(sample_sampler):
     return scheduler
 
 
-def load_params(path):
+def load_params_from_file(path):
     if path.endswith(".txt"):
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -104,7 +110,25 @@ def load_params(path):
         import json
         with open(path, "r", encoding="utf-8") as f:
             params = json.load(f)
+    return params
 
+
+def load_params_from_dicts(dicts):
+    params = []
+    for dic in dicts:
+        # logger.debug(f"param_dict: {dic}, type: {type(dic)}")
+        p = {}
+        if (prompt := dic.get("prompt", dic.get('caption', dic.get('tags')))) is not None:
+            p["prompt"] = prompt
+        if (control_image := dic.get("control_image")) is not None:
+            p["control_image"] = control_image
+        elif (control_image_path := dic.get("control_image_path")) is not None:
+            p["control_image_path"] = control_image_path
+        if (control_scale := dic.get("control_scale")) is not None:
+            p["control_scale"] = control_scale
+        if (sample_name := dic.get("sample_name")) is not None:
+            p["sample_name"] = sample_name
+        params.append(p)
     return params
 
 
@@ -122,6 +146,8 @@ GEN_PARAMS = [
     # "original_height",
     # "original_scale_factor",
     "control_image",
+    "control_image_path",
+    "control_scale",
     "save_latents",
 ]
 
@@ -137,31 +163,37 @@ def patch_default_param(param, default_params):
     return param
 
 
-def set_seed(seed):
-    if seed is None:
-        seed = torch.randint(0, 2 ** 32, (1,)).item()
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    return seed
-
-
 def prepare_param(param):
     height = param["height"]
     width = param["width"]
     height = max(64, height - height % 32)
     width = max(64, width - width % 32)
-    seed = set_seed(param["seed"])
 
-    control_image = Image.open(param["control_image"]).convert("RGB") if param.get("control_image") is not None else None
+    if (control_image := param.get('control_image')) is not None:
+        import io
+        if isinstance(control_image, Image.Image):
+            pass
+        elif isinstance(control_image, dict):
+            if (control_image_bytes := control_image.get('bytes')) is not None:
+                control_image = Image.open(io.BytesIO(control_image_bytes))
+            elif (control_image_path := control_image.get('path')) is not None:
+                control_image = Image.open(control_image_path)
+            else:
+                raise ValueError(f"control image not found")
+        param['control_image'] = control_image.convert('RGB')
+    elif (control_image_path := param.get('control_image_path')) is not None:
+        control_image = Image.open(control_image_path).convert('RGB')
+        param['control_image'] = control_image
     param["height"] = height
     param["width"] = width
-    param["seed"] = seed
+    param["generator"] = torch.Generator().manual_seed(param["seed"])
     param["control_image"] = control_image
-
     return param
 
 
 def overlaid_image(image, conditioning_image):
+    if image.size != conditioning_image.size:
+        raise ValueError(f"image and conditioning_image should have the same size, but image size is {image.size} and conditioning_image size is {conditioning_image.size}")
     image = image.convert("RGBA")
     conditioning_image = conditioning_image.convert("RGBA")
     new_img = Image.blend(image, conditioning_image, alpha=0.5)
@@ -185,14 +217,16 @@ def sample_during_train(
     pipeline,
     accelerator,
     sample_dir,
-    benchmark_file,
+    benchmark,
     default_params,
     epoch,
     steps,
     device,
+    wandb_run=None,
 ):
     logger.print(f"\ngenerating sample images at step: {steps}")
 
+    device_utils.clean_memory_on_device(device)
     use_tmp_vae_device = False
     if hasattr(pipeline, "vae") and (vae := pipeline.vae) is not None:
         orig_vae_device = vae.device
@@ -200,7 +234,12 @@ def sample_during_train(
         use_tmp_vae_device = True
 
     # read prompts
-    gen_params = load_params(benchmark_file)
+    if isinstance(benchmark, (str, Path)):
+        gen_params = load_params_from_file(benchmark)
+    elif isinstance(benchmark, list) and all(isinstance(d, dict) for d in benchmark):
+        gen_params = load_params_from_dicts(benchmark)
+    else:
+        raise ValueError("benchmark should be a path to a file or a list of dictionaries")
     pipeline.to(device)
 
     # sample_dir = os.path.join(config.output_dir, config.output_subdir.samples, f"epoch_{epoch}" if epoch is not None else f"step_{steps}")
@@ -214,21 +253,35 @@ def sample_during_train(
             if not accelerator.is_main_process:
                 continue
 
+            sample_name = param.pop("sample_name", DEFAULT_SAMPLE_NAME)
+
             param = patch_default_param(param, default_params)
+
             param = prepare_param(param)
+            is_controlnet = (control_image := param.get("control_image")) is not None
 
             logger.print(f"sample_{i}:")
+            logger.print(f"  sample_name: {sample_name}", no_prefix=True)
             logger.print(f"  prompt: {param['prompt']}", no_prefix=True)
             logger.print(f"  negative_prompt: {param['negative_prompt']}", no_prefix=True)
             logger.print(f"  seed: {param['seed']}", no_prefix=True)
+            if is_controlnet:
+                logger.print(f"  use controlnet condition", no_prefix=True)
+                if 'control_scale' in param:
+                    logger.print(f"  control_scale: {param['control_scale']}", no_prefix=True)
+                else:
+                    logger.print(f"  control_scale: 1.0 (default)", no_prefix=True)
 
-            def save_latents_callback(step, timestep, latents):
-                images = pipeline.latents_to_image(latents)
-                for j, image in enumerate(images):
-                    num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-                    sample_path = sample_dir / f"latents-{num_suffix}-{i}-{j}-timestep{timestep:.0f}-step{step}.png"  # FIXME: idx is not defined
-                    sample_path.parent.mkdir(parents=True, exist_ok=True)
-                    image.save(sample_path)
+            # logger.debug(f"default_params: {default_params}")
+            # logger.debug(f"param: {param}")
+
+            # def save_latents_callback(step, timestep, latents):
+            #     images = pipeline.latents_to_image(latents)
+            #     for j, image in enumerate(images):
+            #         num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+            #         sample_path = sample_dir / f"latents-{num_suffix}-{i}-{j}-timestep{timestep:.0f}-step{step}.png"  # FIXME: idx is not defined
+            #         sample_path.parent.mkdir(parents=True, exist_ok=True)
+            #         image.save(sample_path)
 
             with accelerator.autocast():
                 pipeline_input = dict(
@@ -244,8 +297,22 @@ def sample_during_train(
                     num_images_per_prompt=param["batch_count"],
                     # callback_on_step_end_tensor_inputs=save_latents_callback if param["save_latents"] else None,
                 )
-                if param["control_image"] is not None:
-                    pipeline_input["controlnet_image"] = param["control_image"]
+                if is_controlnet:
+                    import inspect
+                    gen_param_names = inspect.signature(pipeline.__call__).parameters.keys()
+                    if "controlnet_image" in gen_param_names:
+                        pipeline_input["controlnet_image"] = control_image
+                    elif "image" in gen_param_names:
+                        pipeline_input["image"] = control_image
+                    else:
+                        logger.warning(f"control_image is provided but not used in the pipeline")
+                    if 'controlnet_scale' in gen_param_names and 'control_scale' in param:
+                        pipeline_input['controlnet_scale'] = param["control_scale"]
+                    pipeline_input['width'] = control_image.width // 8 * 8
+                    pipeline_input['height'] = control_image.height // 8 * 8
+                else:
+                    if 'control' in pipeline.__class__.__name__.lower():
+                        logger.warning(f"pipeline {pipeline.__class__.__name__} looks like a controlnet-related pipeline but control condition is not provided")
                 output = pipeline(**pipeline_input)
 
             # save image
@@ -253,49 +320,47 @@ def sample_during_train(
                 images = pipeline.latents_to_image(output)
             else:
                 images = output.images
-            has_controlnet = param.get("control_image") is not None
-            if has_controlnet:
-                control_image: Image.Image = param["control_image"]
-                control_image = control_image.convert('RGB').resize((param["width"], param["height"]), resample=Image.LANCZOS)
+            if is_controlnet:
+                control_image: Image.Image = control_image
+                control_image = control_image.convert('RGB')
+                control_image = dataset_utils.resize_if_needed(control_image, (pipeline_input["width"], pipeline_input["height"]))
                 images_overlaid = []
             for j, image in enumerate(images):
                 # ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
                 num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-                img_filename = f"image-{num_suffix}-{i}-{j}.png"
+                img_filename = f"{sample_name}-{num_suffix}-{i}-{j}.png"
                 image.save(os.path.join(sample_dir, img_filename))
-                if has_controlnet:
+                if wandb_run is not None:
+                    wandb_run.log({img_filename: wandb.Image(image)}, step=steps)
+                if is_controlnet:
                     image_overlaid = overlaid_image(image, control_image)
-                    overlaid_filename = f"image_overlaid-{num_suffix}-{i}-{j}.png"
+                    overlaid_filename = f"{sample_name}_overlaid-{num_suffix}-{i}-{j}.png"
                     image_overlaid.save(os.path.join(sample_dir, overlaid_filename))
+                    if wandb_run is not None:
+                        wandb_run.log({overlaid_filename: wandb.Image(image_overlaid)}, step=steps)
                     images_overlaid.append(image_overlaid)
 
-            if has_controlnet:
-                images_grid = concat_images([control_image] + images)
-            else:
-                images_grid = concat_images(images)
-            grid_filename = f"images_grid-{num_suffix}-{i}.png"
-            images_grid.save(os.path.join(sample_dir, grid_filename))
-            if has_controlnet:
-                images_overlaid_grid = concat_images([control_image] + images_overlaid)
-                overlaid_grid_filename = f"images_overlaid_grid-{num_suffix}-{i}.png"
-                images_overlaid_grid.save(os.path.join(sample_dir, overlaid_grid_filename))
-
-            try:
-                wandb_tracker = accelerator.get_tracker("wandb")
-                try:
-                    import wandb
-                except ImportError:
-                    raise ImportError("No wandb installed. Please install wandb to use this feature.")
-                wandb_tracker.log({f"sample_{i}": wandb.Image(image)})
-            except:
-                pass
+            if len(images) > 1:
+                if is_controlnet:
+                    images_grid = concat_images([control_image] + images)
+                else:
+                    images_grid = concat_images(images)
+                grid_filename = f"{sample_name}_grid-{num_suffix}-{i}.png"
+                images_grid.save(os.path.join(sample_dir, grid_filename))
+                if wandb_run is not None:
+                    wandb_run.log({grid_filename: wandb.Image(images_grid)}, step=steps)
+                if is_controlnet:
+                    images_overlaid_grid = concat_images([control_image] + images_overlaid)
+                    overlaid_grid_filename = f"{sample_name}_overlaid_grid-{num_suffix}-{i}.png"
+                    images_overlaid_grid.save(os.path.join(sample_dir, overlaid_grid_filename))
+                    if wandb_run is not None:
+                        wandb_run.log({overlaid_grid_filename: wandb.Image(images_overlaid_grid)}, step=steps)
 
     # clear pipeline and cache to reduce vram usage
     del pipeline
-    torch.cuda.empty_cache()
-
     torch.set_rng_state(rng_state)
     if cuda_rng_state is not None:
         torch.cuda.set_rng_state(cuda_rng_state)
     if use_tmp_vae_device:
         vae.to(orig_vae_device)
+    device_utils.clean_memory_on_device(device)

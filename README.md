@@ -21,17 +21,25 @@ pip install -r requirements.txt
 
 ### 准备数据
 
-数据集由两部分组成：数据和元数据。二者分开放置和读取。
-数据即训练图像，元数据则是数据的详细信息，包括每个数据的标注等信息。
+一个简单的数据集由两部分组成：图片文件和标注文件，标注文件放在用于图片文件同名的 txt 文本文件中，例如：
+
+```
+data/
+|-- 0001.jpg # 图片文件
+|-- 0001.txt # 标注文件，例如，"a dog playing with a ball"
+|-- 0002.jpg
+|-- 0002.txt
+|-- ...
+```
 
 ### 配置参数
 
-在 [configs/train_config.py](configs/config_train_sd3.py) 内配置参数（或自行新建）后，执行 `accelerate launch train_sd3.py --config configs/config_train_sd3.py` 即可开始训练。
+在 [configs/config_train_sdxl.py](configs/config_train_sdxl.py) 内配置参数（或自行新建）后，执行 `accelerate launch train.py --trainer sdxl --config configs/config_train_sdxl.py` 即可开始训练。
 
-其中，`--config` 参数为配置文件路径，`configs/config_train_sd3.py` 为默认配置文件，您需要根据自己的需求修改配置文件，或指定您自己修改的配置文件路径。
+其中，`--config` 参数为配置文件路径，`configs/config_train_sdxl.py` 为默认配置文件，您需要根据自己的需求修改配置文件，或指定您自己修改的配置文件路径。
 
-完整的参数介绍请参考 [docs/CONFIG.md](docs/CONFIG.md)。
+完整的参数介绍请参考 [docs/config.md](docs/config.md)。
 
-### 多 GPU 训练
+```
 
-将原本参数中的 `accelerate launch train_sd3.py --config configs/config_train_sd3.py` 更换为 `accelerate launch --num_processes=4 --multi_gpu --gpu_ids=0,1,2,3 train_sd3.py --config configs/config_train_sd3.py` 即可进行多 GPU 训练，其中 `--num_processes` 为进程数，`--gpu_ids` 为 GPU 编号。
+```

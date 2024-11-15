@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import PIL
-from typing import List, Tuple
 from packaging import version
 try:
     from diffusers.utils import PIL_INTERPOLATION

@@ -5,29 +5,32 @@ import torch
 from typing import Literal
 from diffusers import FlowMatchEulerDiscreteScheduler, SD3Transformer2DModel
 from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import StableDiffusion3Pipeline
-from .t2i_trainer import T2ITrainer
+from .sd15_trainer import SD15Trainer
 from ..train_state.sd3_train_state import SD3TrainState
-from ..datasets.t2i_dataset import T2ITrainDataset
-from ..utils import sd3_model_utils, model_utils
+from ..datasets.t2i_dataset import T2IDataset
+from ..utils import sd3_model_utils
 
 
-class SD3T2ITrainer(T2ITrainer):
-    dataset_class = T2ITrainDataset
+class SD3Trainer(SD15Trainer):
+    dataset_class = T2IDataset
     train_state_class = SD3TrainState
     nnet_class = SD3Transformer2DModel
     pipeline_class = StableDiffusion3Pipeline
     dropout_t5: bool = True
     timestep_sampler_type: Literal['sigma_sqrt', 'logit_normal', 'mode'] = "logit_normal"
 
+    def load_tokenizer_model(self):
+        # tokenizers are loaded from `load_diffusion_model`
+        return {}
+
     def load_diffusion_model(self):
-        models = {}
         # tokenizer1, tokenizer2, tokenizer3 = sd3_model_utils.load_sd3_tokenizers(
         #     self.tokenizer_cache_dir,
         #     max_token_length=self.max_token_length
         # )
         # models['tokenizer1'], models['tokenizer2'], models['tokenizer3'] = tokenizer1, tokenizer2, tokenizer3
         if os.path.isfile(self.pretrained_model_name_or_path):
-            models_ = sd3_model_utils.load_models_from_stable_diffusion_checkpoint(
+            diffusion_models = sd3_model_utils.load_models_from_stable_diffusion_checkpoint(
                 self.pretrained_model_name_or_path,
                 device=self.device,
                 dtype=torch.float16,
@@ -35,7 +38,7 @@ class SD3T2ITrainer(T2ITrainer):
             )
 
         else:
-            models_ = sd3_model_utils.load_models_from_stable_diffusion_diffusers_state(
+            diffusion_models = sd3_model_utils.load_models_from_stable_diffusion_diffusers_state(
                 self.pretrained_model_name_or_path,
                 revision=self.revision,
                 variant=self.variant,
@@ -46,11 +49,7 @@ class SD3T2ITrainer(T2ITrainer):
                 dropout_t5=self.dropout_t5,
                 max_retries=self.max_retries,
             )
-        models.update(models_)
-        if self.vae_model_name_or_path is not None:
-            models['vae'] = model_utils.load_vae(self.vae_model_name_or_path, dtype=self.weight_dtype)
-            self.logger.print(f"additional vae model loaded from {self.vae_model_name_or_path}")
-        return models
+        return diffusion_models
 
     def get_vae_scale_factor(self):
         return self.vae.config.scaling_factor
@@ -76,7 +75,8 @@ class SD3T2ITrainer(T2ITrainer):
             self.learning_rate_te1
         ) = self._setup_one_text_encoder_params(
             self.text_encoder1,
-            self.learning_rate_te1
+            self.learning_rate_te1,
+            name="text_encoder1"
         )
         training_models.extend(training_models_)
         params_to_optimize.extend(params_to_optimize_)
@@ -89,7 +89,8 @@ class SD3T2ITrainer(T2ITrainer):
             self.learning_rate_te2
         ) = self._setup_one_text_encoder_params(
             self.text_encoder2,
-            self.learning_rate_te2
+            self.learning_rate_te2,
+            name="text_encoder2"
         )
         training_models.extend(training_models_)
         params_to_optimize.extend(params_to_optimize_)
@@ -103,7 +104,8 @@ class SD3T2ITrainer(T2ITrainer):
                 self.learning_rate_te3
             ) = self._setup_one_text_encoder_params(
                 self.text_encoder3,
-                self.learning_rate_te3
+                self.learning_rate_te3,
+                name="text_encoder3",
             )
             training_models.extend(training_models_)
             params_to_optimize.extend(params_to_optimize_)
@@ -134,21 +136,25 @@ class SD3T2ITrainer(T2ITrainer):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
-    def get_train_state(self):
-        return self.train_state_class.from_config(
-            self.config,
-            self.accelerator,
-            pipeline_class=self.pipeline_class,
-            optimizer=self.optimizer,
-            lr_scheduler=self.lr_scheduler,
-            train_dataloader=self.train_dataloader,
-            save_dtype=self.save_dtype,
-            nnet=self.nnet,
-            text_encoder=[self.text_encoder1, self.text_encoder2, self.text_encoder3],
-            tokenizer=[self.tokenizer1, self.tokenizer2, self.tokenizer3],
-            noise_scheduler=self.noise_scheduler,
-            vae=self.vae,
-        )
+    # def get_train_state(self):
+    #     return self.train_state_class.from_config(
+    #         self.config,
+    #         self,
+    #         self.accelerator,
+    #         train_dataset=self.train_dataset,
+    #         valid_dataset=self.valid_dataset,
+    #         pipeline_class=self.pipeline_class,
+    #         optimizer=self.optimizer,
+    #         lr_scheduler=self.lr_scheduler,
+    #         train_dataloader=self.train_dataloader,
+    #         valid_dataloader=self.valid_dataloader,
+    #         save_dtype=self.save_dtype,
+    #         nnet=self.nnet,
+    #         text_encoder=[self.text_encoder1, self.text_encoder2, self.text_encoder3],
+    #         tokenizer=[self.tokenizer1, self.tokenizer2, self.tokenizer3],
+    #         noise_scheduler=self.noise_scheduler,
+    #         vae=self.vae,
+    #     )
 
     def _print_start_training_message(self):
         super()._print_start_training_message()
@@ -197,8 +203,7 @@ class SD3T2ITrainer(T2ITrainer):
         noise = self.get_noise(latents)
         timesteps = self.get_timesteps(latents).to(self.device)
         sigmas = self.get_sigmas(timesteps, n_dim=latents.ndim, dtype=latents.dtype)
-        noisy_latents = self.get_noisy_latents(latents, noise, sigmas)
-        noisy_latents = noisy_latents.to(self.weight_dtype)
+        noisy_latents = self.get_noisy_latents(latents, noise, sigmas).to(self.weight_dtype)
 
         with self.accelerator.autocast():
             model_pred = self.nnet(

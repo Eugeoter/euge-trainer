@@ -1,11 +1,11 @@
-import torch
 import os
 import copy
 from diffusers import SD3Transformer2DModel
 from transformers import PretrainedConfig
-from . import model_utils, log_utils
+from waifuset import logging
+from . import sd15_model_utils
 
-logger = log_utils.get_logger("model")
+logger = logging.get_logger("model")
 
 TOKENIZER1_PATH = "openai/clip-vit-large-patch14"
 TOKENIZER2_PATH = "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"
@@ -57,12 +57,13 @@ def load_sd3_tokenizers(tokenizer_cache_dir=None, max_token_length=77):
 
     if max_token_length is not None:
         logger.print(f"update token length: {max_token_length}")
+        # TODO
 
     return tokenizers
 
 
 def load_models_from_stable_diffusion_checkpoint(ckpt_path, device="cpu", dtype=None, nnet_class=SD3Transformer2DModel):
-    if model_utils.is_safetensors(ckpt_path):
+    if sd15_model_utils.is_safetensors(ckpt_path):
         from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import StableDiffusion3Pipeline
         pipe: StableDiffusion3Pipeline = StableDiffusion3Pipeline.from_single_file(
             ckpt_path, use_safetensors=True,
@@ -117,11 +118,11 @@ def load_models_from_stable_diffusion_diffusers_state(pretrained_model_name_or_p
                 **kwargs,
             ).to(device)
             break
-        except model_utils.NETWORK_EXCEPTIONS:
+        except sd15_model_utils.NETWORK_EXCEPTIONS:
             if max_retries is not None and retries >= max_retries:
                 raise
             retries += 1
-            logger.print(log_utils.yellow(f"Connection error when downloading model `{pretrained_model_name_or_path}` from HuggingFace. Retrying..."))
+            logger.print(logging.yellow(f"Connection error when downloading model `{pretrained_model_name_or_path}` from HuggingFace. Retrying..."))
             continue
     text_encoder1, text_encoder2, text_encoder3 = pipe.text_encoder, pipe.text_encoder_2, pipe.text_encoder_3
     tokenizer1, tokenizer2, tokenizer3 = pipe.tokenizer, pipe.tokenizer_2, pipe.tokenizer_3

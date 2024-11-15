@@ -17,7 +17,8 @@ from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput, StableDiffusionSafetyChecker
 from diffusers.utils import logging
 from PIL import Image
-from ..utils import sdxl_model_utils, sdxl_train_utils, log_utils
+from waifuset import logging
+from ..utils import sdxl_model_utils, sdxl_train_utils
 
 
 try:
@@ -41,7 +42,7 @@ except ImportError:
         }
 # ------------------------------------------------------------------------------
 
-logger = log_utils.get_logger("eval")
+logger = logging.get_logger("eval")
 
 re_attention = re.compile(
     r"""
@@ -180,7 +181,7 @@ def get_prompts_with_weights(pipe: StableDiffusionPipeline, prompt: List[str], m
         tokens.append(text_token)
         weights.append(text_weight)
     if truncated:
-        logger.print(log_utils.magenta("Prompt was truncated. Try to shorten the prompt or increase max_embeddings_multiples"))
+        logger.warning("Prompt was truncated. Try to shorten the prompt or increase `max_embeddings_multiples`.")
     return tokens, weights
 
 
@@ -500,7 +501,7 @@ def prepare_controlnet_image(
     return image
 
 
-class SdxlStableDiffusionLongPromptWeightingPipeline:
+class SDXLStableDiffusionLongPromptWeightingPipeline:
     r"""
     Pipeline for text-to-image generation using Stable Diffusion without tokens length limit, and support parsing
     weighting in prompt.

@@ -5,8 +5,9 @@ from accelerate.utils.modeling import set_module_tensor_to_device
 from safetensors.torch import load_file, save_file
 from transformers import CLIPTextModel, CLIPTextConfig, CLIPTextModelWithProjection, CLIPTokenizer
 from diffusers import AutoencoderKL, EulerDiscreteScheduler, UNet2DConditionModel
-from . import model_utils, log_utils
-from ..models.nnet.sdxl_original_unet import SdxlUNet2DConditionModel
+from waifuset import logging
+from . import sd15_model_utils
+from ..models.sdxl.nnet import SDXLUNet2DConditionModel
 
 VAE_SCALE_FACTOR = 0.13025
 MODEL_VERSION_SDXL_BASE_V1_0 = "sdxl_base_v1-0"
@@ -119,7 +120,7 @@ TEXT_ENCODER_2_CONFIG = CLIPTextConfig(
     # transformers_version="4.25.0.dev0",
 )
 
-logger = log_utils.get_logger("model")
+logger = logging.get_logger("model")
 
 
 def convert_sdxl_text_encoder_2_checkpoint(checkpoint, max_length):
@@ -221,8 +222,8 @@ def _load_state_dict_on_device(model, state_dict, device, dtype=None):
     # raise RuntimeError("Error(s) in loading state_dict for {}:\n\t{}".format(model.__class__.__name__, "\n\t".join(error_msgs)))
 
 
-def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_class=SdxlUNet2DConditionModel):
-    vae_config = model_utils.create_vae_diffusers_config()
+def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_class=SDXLUNet2DConditionModel):
+    vae_config = sd15_model_utils.create_vae_diffusers_config()
     with init_empty_weights():
         unet = nnet_class()
         text_encoder1 = CLIPTextModel._from_config(TEXT_ENCODER_1_CONFIG)
@@ -246,7 +247,7 @@ def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_
     #     del text_encoder1_sd["text_model.embeddings.position_ids"]
     # if 'text_model.embeddings.position_ids' in text_encoder2_sd:
     #     del text_encoder2_sd["text_model.embeddings.position_ids"]
-    vae_sd = model_utils.convert_ldm_vae_checkpoint(vae_sd, vae_config)
+    vae_sd = sd15_model_utils.convert_ldm_vae_checkpoint(vae_sd, vae_config)
 
     _load_state_dict_on_device(unet, unet_sd, device=device, dtype=dtype)
     _load_state_dict_on_device(text_encoder1, text_encoder1_sd, device=device)
@@ -258,11 +259,19 @@ def load_models_from_sdxl_state_dict(state_dict, device='cpu', dtype=None, nnet_
     return {'nnet': unet, 'text_encoder1': text_encoder1, 'text_encoder2': text_encoder2, 'vae': vae, 'logit_scale': logit_scale}
 
 
-def load_models_from_sdxl_checkpoint(ckpt_path, device='cpu', dtype=None, nnet_class=SdxlUNet2DConditionModel):
+def extract_unet_state_dict(state_dict):
+    unet_sd = {}
+    for k, v in state_dict.items():
+        if k.startswith(UNET_KEY_PREFIX):
+            unet_sd[k[len(UNET_KEY_PREFIX):]] = v
+    return unet_sd
+
+
+def load_models_from_sdxl_checkpoint(ckpt_path, device='cpu', dtype=None, nnet_class=SDXLUNet2DConditionModel):
     r"""
     Load SDXL components from a local checkpoint file.
     """
-    if model_utils.is_safetensors(ckpt_path):
+    if sd15_model_utils.is_safetensors(ckpt_path):
         state_dict = load_file(ckpt_path)
         ckpt_info = None
     else:
@@ -277,7 +286,7 @@ def load_models_from_sdxl_checkpoint(ckpt_path, device='cpu', dtype=None, nnet_c
     return models
 
 
-def load_models_from_sdxl_diffusers_state(version, device='cpu', dtype=None, variant=None, nnet_class=SdxlUNet2DConditionModel, cache_dir=None, token=None, max_retries=None):
+def load_models_from_sdxl_diffusers_state(version, device='cpu', dtype=None, variant=None, nnet_class=SDXLUNet2DConditionModel, cache_dir=None, token=None, max_retries=None):
     r"""
     Load SDXL components from a hf or local diffusers checkpoint.
     """
@@ -290,14 +299,14 @@ def load_models_from_sdxl_diffusers_state(version, device='cpu', dtype=None, var
                 version, torch_dtype=dtype, variant=variant, tokenizer=None, cache_dir=cache_dir, token=token,
             )
             break
-        except model_utils.NETWORK_EXCEPTIONS:
-            logger.print(log_utils.yellow(f"Connection error when downloading model `{version}` from HuggingFace. Retrying..."))
+        except sd15_model_utils.NETWORK_EXCEPTIONS:
+            logger.print(logging.yellow(f"Connection error when downloading model `{version}` from HuggingFace. Retrying..."))
             if max_retries is not None and retries >= max_retries:
                 raise
             retries += 1
             continue
         except ValueError:
-            logger.print(log_utils.yellow(f"Model `{version}` not found on HuggingFace. Use default variant instead."))
+            logger.print(logging.yellow(f"Model `{version}` not found on HuggingFace. Use default variant instead."))
             variant = None
             continue
     unet, text_encoder1, text_encoder2, vae = pipe.unet, pipe.text_encoder, pipe.text_encoder_2, pipe.vae
@@ -305,6 +314,86 @@ def load_models_from_sdxl_diffusers_state(version, device='cpu', dtype=None, var
     with init_empty_weights():
         unet = nnet_class()  # overwrite unet
     _load_state_dict_on_device(unet, unet_sd, device=device, dtype=dtype)
+    return {'nnet': unet, 'text_encoder1': text_encoder1, 'text_encoder2': text_encoder2, 'vae': vae, 'logit_scale': None, 'ckpt_info': None}
+
+
+def load_diffusers_models(
+    pretrained_model_name_or_path,
+    revision=None,
+    variant=None,
+    torch_dtype=None,
+    use_safetensors=False,
+    cache_dir=None,
+    token=None,
+    max_retries=None,
+    nnet_class=UNet2DConditionModel,
+):
+    pipeline_init_kwargs = {}
+    from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import StableDiffusionXLPipeline
+
+    # load unet
+    retries = 0
+    while True:
+        try:
+            if os.path.isfile(pretrained_model_name_or_path):
+                # load unet from local checkpoint
+                unet_sd = load_file(pretrained_model_name_or_path) if pretrained_model_name_or_path.endswith(".safetensors") else torch.load(pretrained_model_name_or_path)
+                unet_sd = extract_unet_state_dict(unet_sd)
+                unet_sd = convert_sdxl_unet_state_dict_to_diffusers(unet_sd)
+                unet = nnet_class.from_config(DIFFUSERS_SDXL_UNET_CONFIG)
+                unet.load_state_dict(unet_sd, strict=True)
+                unet.to(dtype=torch_dtype)
+            else:
+                unet = nnet_class.from_pretrained(
+                    pretrained_model_name_or_path,
+                    cache_dir=cache_dir,
+                    variant=variant,
+                    torch_dtype=torch_dtype,
+                    use_safetensors=use_safetensors,
+                    token=token,
+                    subfolder="unet",
+                )
+            break
+        except sd15_model_utils.NETWORK_EXCEPTIONS:
+            if max_retries is not None and retries >= max_retries:
+                raise
+            retries += 1
+            continue
+
+    retries = 0
+    while True:
+        try:
+            if os.path.isfile(pretrained_model_name_or_path):
+                pipeline: StableDiffusionXLPipeline = StableDiffusionXLPipeline.from_single_file(
+                    pretrained_model_name_or_path,
+                    use_safetensors=pretrained_model_name_or_path.endswith(".safetensors"),
+                    local_files_only=True,
+                    torch_dtype=torch_dtype,
+                    cache_dir=cache_dir,
+                    token=token,
+                    **pipeline_init_kwargs,
+                )
+            else:
+                pipeline: StableDiffusionXLPipeline = StableDiffusionXLPipeline.from_pretrained(
+                    pretrained_model_name_or_path,
+                    revision=revision,
+                    variant=variant,
+                    torch_dtype=torch_dtype,
+                    use_safetensors=use_safetensors,
+                    cache_dir=cache_dir,
+                    token=token,
+                    **pipeline_init_kwargs,
+                )
+            break
+        except sd15_model_utils.NETWORK_EXCEPTIONS:
+            if max_retries is not None and retries >= max_retries:
+                raise
+            retries += 1
+            continue
+
+    text_encoder1 = pipeline.text_encoder
+    text_encoder2 = pipeline.text_encoder_2
+    vae = pipeline.vae
     return {'nnet': unet, 'text_encoder1': text_encoder1, 'text_encoder2': text_encoder2, 'vae': vae, 'logit_scale': None, 'ckpt_info': None}
 
 
@@ -515,7 +604,7 @@ def convert_models_to_sdxl_state_dict(
     update_sd("conditioner.embedders.1.model.", text_enc2_dict)
 
     # Convert the VAE
-    vae_dict = model_utils.convert_vae_state_dict(vae.state_dict())
+    vae_dict = sd15_model_utils.convert_vae_state_dict(vae.state_dict())
     update_sd("first_stage_model.", vae_dict)
 
     return state_dict
@@ -531,6 +620,9 @@ def save_stable_diffusion_checkpoint(
     vae,
     logit_scale,
     save_dtype=None,
+    use_mem_eff_save=False,
+    v_pred=False,
+    ztsnr=False,
 ):
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     state_dict = convert_models_to_sdxl_state_dict(
@@ -542,11 +634,19 @@ def save_stable_diffusion_checkpoint(
         dtype=save_dtype,
     )
 
+    if v_pred:
+        state_dict["v_pred"] = torch.tensor([])
+        if ztsnr:
+            state_dict["ztsnr"] = torch.tensor([])
+
     # Put together new checkpoint
     key_count = len(state_dict.keys())
 
-    if model_utils.is_safetensors(output_file):
-        save_file(state_dict, output_file)
+    if sd15_model_utils.is_safetensors(output_file):
+        if use_mem_eff_save:
+            sd15_model_utils.mem_eff_save_file(state_dict, output_file)
+        else:
+            save_file(state_dict, output_file)
     else:
         new_ckpt = {"state_dict": state_dict}
 

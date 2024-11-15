@@ -1,4 +1,4 @@
-opencv-python
+opencv-contrib-python
 pillow
 scipy
 aiofiles
@@ -14,5 +14,13 @@ bitsandbytes==0.39.1
 tensorboard
 absl-py
 ml-collections
-git@github.com:Eugeoter/waifuset.git@dev
-# lion_pytorch
+datasets==2.21.0
+huggingface-hub
+peft
+sentencepiece
+tqdm
+waifuset==0.2.11
+matplotlib
+controlnet_aux
+wandb
+lion_pytorch

@@ -1,9 +1,9 @@
 import torch
 from typing import List, Dict, Any
-from .t2i_dataset import T2ITrainDataset
+from .t2i_dataset import T2IDataset
 
 
-class SDXLTrainDataset(T2ITrainDataset):
+class SDXLDataset(T2IDataset):
     def get_size_sample(self, batch: List[str], samples: Dict[str, Any]):
         sample = dict(
             target_size_hw=[],
@@ -12,9 +12,11 @@ class SDXLTrainDataset(T2ITrainDataset):
         )
         for i, img_key in enumerate(batch):
             img_md = self.dataset[img_key]
+            image_size, original_size, bucket_size = self.get_size(img_md)
             original_size = img_md['original_size'] or img_md['image_size']
-            target_size = img_md['bucket_size']
+            target_size = bucket_size
             crop_ltrb = img_md.get('crop_ltrb') or (0, 0, target_size[0], target_size[1])
+            # crop_ltrb = (0, 0, 0, 0)
             is_flipped = samples["is_flipped"][i]
             if not is_flipped:
                 crop_left_top = (crop_ltrb[0], crop_ltrb[1])

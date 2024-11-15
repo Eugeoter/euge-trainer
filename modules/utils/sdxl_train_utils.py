@@ -1,14 +1,16 @@
 import torch
 import math
 import os
+import re
 import gc
 from accelerate import init_empty_weights
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextModelWithProjection
-from typing import Optional, List
-from . import train_utils, sdxl_model_utils, model_utils, log_utils
-from ..models import sdxl_original_unet
+from typing import Optional, List, Union
+from waifuset import logging
+from . import sd15_model_utils, train_utils, sdxl_model_utils
+from ..models.sdxl import nnet as sdxl_original_unet
 
-logger = log_utils.get_logger("train")
+logger = logging.get_logger("train")
 
 VAE_SCALE_FACTOR = 0.13025
 
@@ -201,7 +203,7 @@ def _load_target_model(
 
     # VAEを読み込む
     if vae_path is not None:
-        vae = model_utils.load_vae(vae_path, weight_dtype)
+        vae = sd15_model_utils.load_vae(vae_path, weight_dtype)
         logger.print("additional VAE loaded")
 
     return load_stable_diffusion_format, text_encoder1, text_encoder2, vae, unet, logit_scale, ckpt_info
@@ -378,3 +380,439 @@ def save_sdxl_model_during_train(
         save_dtype,
     )
     return save_path
+
+
+# def encode_caption(
+
+#     captions,
+#     negative_captions=None,
+# ):
+#     text_embeddings1, text_pool1, uncond_embeddings1, uncond_pool1 = encode_caption(
+#         captions,
+#         negative_captions=negative_captions,
+#         is_sdxl_text_encoder2=False,
+#     )
+#     text_embeddings2, text_pool2, uncond_embeddings2, uncond_pool2 = encode_caption(
+#         captions,
+#         negative_captions=negative_captions,
+#         is_sdxl_text_encoder2=True,
+#     )
+#     return text_embeddings1, text_embeddings2, text_pool2, uncond_embeddings1, uncond_embeddings2, uncond_pool2
+
+
+def encode_caption(
+    text_encoder,
+    tokenizer,
+    captions,
+    negative_captions=None,
+    max_embeddings_multiples=3,
+    clip_skip=False,
+    do_classifier_free_guidance=False,
+    is_sdxl_text_encoder2=False,
+    skip_parsing=True,
+    device=None,
+):
+    device = device or text_encoder.device
+    batch_size = len(captions) if isinstance(captions, list) else 1
+
+    if negative_captions is None:
+        negative_captions = [""] * batch_size
+    elif isinstance(negative_captions, str):
+        negative_captions = [negative_captions] * batch_size
+    if batch_size != len(negative_captions):
+        raise ValueError(
+            f"`negative_captions`: {negative_captions} has batch size {len(negative_captions)}, but `prompt`:"
+            f" {captions} has batch size {batch_size}. Please make sure that passed `negative_captions` matches"
+            " the batch size of `prompt`."
+        )
+
+    text_embeddings, text_pool, uncond_embeddings, uncond_pool = get_weighted_text_embeddings(
+        text_encoder=text_encoder,
+        tokenizer=tokenizer,
+        captions=captions,
+        negative_captions=negative_captions if do_classifier_free_guidance else None,
+        max_embeddings_multiples=max_embeddings_multiples,
+        clip_skip=clip_skip,
+        is_sdxl_text_encoder2=is_sdxl_text_encoder2,
+        skip_parsing=True,
+        device=device,
+    )
+
+    bs_embed, seq_len, _ = text_embeddings.shape
+    text_embeddings = text_embeddings.view(bs_embed, seq_len, -1)
+    if text_pool is not None:
+        text_pool = text_pool.view(bs_embed, -1)
+
+    if do_classifier_free_guidance:
+        bs_embed, seq_len, _ = uncond_embeddings.shape
+        uncond_embeddings = uncond_embeddings.view(bs_embed, seq_len, -1)
+        if uncond_pool is not None:
+            uncond_pool = uncond_pool.view(bs_embed, -1)
+
+        return text_embeddings, text_pool, uncond_embeddings, uncond_pool
+
+    return text_embeddings, text_pool, None, None
+
+
+re_attention = re.compile(
+    r"""
+\\\(|
+\\\)|
+\\\[|
+\\]|
+\\\\|
+\\|
+\(|
+\[|
+:([+-]?[.\d]+)\)|
+\)|
+]|
+[^\\()\[\]:]+|
+:
+""",
+    re.X,
+)
+
+
+def parse_prompt_attention(text):
+    """
+    Parses a string with attention tokens and returns a list of pairs: text and its associated weight.
+    Accepted tokens are:
+      (abc) - increases attention to abc by a multiplier of 1.1
+      (abc:3.12) - increases attention to abc by a multiplier of 3.12
+      [abc] - decreases attention to abc by a multiplier of 1.1
+      \( - literal character '('
+      \[ - literal character '['
+      \) - literal character ')'
+      \] - literal character ']'
+      \\ - literal character '\'
+      anything else - just text
+    >>> parse_prompt_attention('normal text')
+    [['normal text', 1.0]]
+    >>> parse_prompt_attention('an (important) word')
+    [['an ', 1.0], ['important', 1.1], [' word', 1.0]]
+    >>> parse_prompt_attention('(unbalanced')
+    [['unbalanced', 1.1]]
+    >>> parse_prompt_attention('\(literal\]')
+    [['(literal]', 1.0]]
+    >>> parse_prompt_attention('(unnecessary)(parens)')
+    [['unnecessaryparens', 1.1]]
+    >>> parse_prompt_attention('a (((house:1.3)) [on] a (hill:0.5), sun, (((sky))).')
+    [['a ', 1.0],
+     ['house', 1.5730000000000004],
+     [' ', 1.1],
+     ['on', 1.0],
+     [' a ', 1.1],
+     ['hill', 0.55],
+     [', sun, ', 1.1],
+     ['sky', 1.4641000000000006],
+     ['.', 1.1]]
+    """
+
+    res = []
+    round_brackets = []
+    square_brackets = []
+
+    round_bracket_multiplier = 1.1
+    square_bracket_multiplier = 1 / 1.1
+
+    def multiply_range(start_position, multiplier):
+        for p in range(start_position, len(res)):
+            res[p][1] *= multiplier
+
+    for m in re_attention.finditer(text):
+        text = m.group(0)
+        weight = m.group(1)
+
+        if text.startswith("\\"):
+            res.append([text[1:], 1.0])
+        elif text == "(":
+            round_brackets.append(len(res))
+        elif text == "[":
+            square_brackets.append(len(res))
+        elif weight is not None and len(round_brackets) > 0:
+            multiply_range(round_brackets.pop(), float(weight))
+        elif text == ")" and len(round_brackets) > 0:
+            multiply_range(round_brackets.pop(), round_bracket_multiplier)
+        elif text == "]" and len(square_brackets) > 0:
+            multiply_range(square_brackets.pop(), square_bracket_multiplier)
+        else:
+            res.append([text, 1.0])
+
+    for pos in round_brackets:
+        multiply_range(pos, round_bracket_multiplier)
+
+    for pos in square_brackets:
+        multiply_range(pos, square_bracket_multiplier)
+
+    if len(res) == 0:
+        res = [["", 1.0]]
+
+    # merge runs of identical weights
+    i = 0
+    while i + 1 < len(res):
+        if res[i][1] == res[i + 1][1]:
+            res[i][0] += res[i + 1][0]
+            res.pop(i + 1)
+        else:
+            i += 1
+
+    return res
+
+
+def get_captions_with_weights(tokenizer, captions: List[str], max_length: int):
+    r"""
+    Tokenize a list of prompts and return its tokens with weights of each token.
+
+    No padding, starting or ending token is included.
+    """
+    tokens = []
+    weights = []
+    truncated = False
+    for text in captions:
+        texts_and_weights = parse_prompt_attention(text)
+        text_token = []
+        text_weight = []
+        for word, weight in texts_and_weights:
+            # tokenize and discard the starting and the ending token
+            token = tokenizer(word).input_ids[1:-1]
+            text_token += token
+            # copy the weight by length of token
+            text_weight += [weight] * len(token)
+            # stop if the text is too long (longer than truncation limit)
+            if len(text_token) > max_length:
+                truncated = True
+                break
+        # truncate
+        if len(text_token) > max_length:
+            truncated = True
+            text_token = text_token[:max_length]
+            text_weight = text_weight[:max_length]
+        tokens.append(text_token)
+        weights.append(text_weight)
+    if truncated:
+        logger.warning("Prompt was truncated. Try to shorten the prompt or increase `max_embeddings_multiples`.")
+    return tokens, weights
+
+
+def pad_tokens_and_weights(tokens, weights, max_length, bos, eos, pad, no_boseos_middle=True, chunk_length=77):
+    r"""
+    Pad the tokens (with starting and ending tokens) and weights (with 1.0) to max_length.
+    """
+    max_embeddings_multiples = (max_length - 2) // (chunk_length - 2)
+    weights_length = max_length if no_boseos_middle else max_embeddings_multiples * chunk_length
+    for i in range(len(tokens)):
+        tokens[i] = [bos] + tokens[i] + [eos] + [pad] * (max_length - 2 - len(tokens[i]))
+        if no_boseos_middle:
+            weights[i] = [1.0] + weights[i] + [1.0] * (max_length - 1 - len(weights[i]))
+        else:
+            w = []
+            if len(weights[i]) == 0:
+                w = [1.0] * weights_length
+            else:
+                for j in range(max_embeddings_multiples):
+                    w.append(1.0)  # weight for starting token in this chunk
+                    w += weights[i][j * (chunk_length - 2): min(len(weights[i]), (j + 1) * (chunk_length - 2))]
+                    w.append(1.0)  # weight for ending token in this chunk
+                w += [1.0] * (weights_length - len(w))
+            weights[i] = w[:]
+
+    return tokens, weights
+
+
+def get_hidden_states(text_encoder, input_ids, is_sdxl_text_encoder2: bool, eos_token_id, device):
+    if not is_sdxl_text_encoder2:
+        # text_encoder1: same as SD1/2
+        enc_out = text_encoder(input_ids.to(text_encoder.device), output_hidden_states=True, return_dict=True)
+        hidden_states = enc_out["hidden_states"][11]
+        pool = None
+    else:
+        # text_encoder2
+        enc_out = text_encoder(input_ids.to(text_encoder.device), output_hidden_states=True, return_dict=True)
+        hidden_states = enc_out["hidden_states"][-2]  # penuultimate layer
+        # pool = enc_out["text_embeds"]
+        pool = pool_workaround(text_encoder, enc_out["last_hidden_state"], input_ids, eos_token_id)
+    hidden_states = hidden_states.to(device)
+    if pool is not None:
+        pool = pool.to(device)
+    return hidden_states, pool
+
+
+def get_unweighted_text_embeddings(
+    text_encoder,
+    text_input: torch.Tensor,
+    chunk_length: int,
+    clip_skip: int,
+    eos: int,
+    pad: int,
+    is_sdxl_text_encoder2: bool,
+    no_boseos_middle: Optional[bool] = True,
+    device=None,
+):
+    """
+    When the length of tokens is a multiple of the capacity of the text encoder,
+    it should be split into chunks and sent to the text encoder individually.
+    """
+    device = device or text_encoder.device
+    max_embeddings_multiples = (text_input.shape[1] - 2) // (chunk_length - 2)
+    text_pool = None
+    if max_embeddings_multiples > 1:
+        text_embeddings = []
+        for i in range(max_embeddings_multiples):
+            # extract the i-th chunk
+            text_input_chunk = text_input[:, i * (chunk_length - 2): (i + 1) * (chunk_length - 2) + 2].clone()
+
+            # cover the head and the tail by the starting and the ending tokens
+            text_input_chunk[:, 0] = text_input[0, 0]
+            if pad == eos:  # v1
+                text_input_chunk[:, -1] = text_input[0, -1]
+            else:  # v2
+                for j in range(len(text_input_chunk)):
+                    if text_input_chunk[j, -1] != eos and text_input_chunk[j, -1] != pad:  # 最後に普通の文字がある
+                        text_input_chunk[j, -1] = eos
+                    if text_input_chunk[j, 1] == pad:  # BOSだけであとはPAD
+                        text_input_chunk[j, 1] = eos
+
+            text_embedding, current_text_pool = get_hidden_states(
+                text_encoder, text_input_chunk, is_sdxl_text_encoder2, eos, device
+            )
+            if text_pool is None:
+                text_pool = current_text_pool
+
+            if no_boseos_middle:
+                if i == 0:
+                    # discard the ending token
+                    text_embedding = text_embedding[:, :-1]
+                elif i == max_embeddings_multiples - 1:
+                    # discard the starting token
+                    text_embedding = text_embedding[:, 1:]
+                else:
+                    # discard both starting and ending tokens
+                    text_embedding = text_embedding[:, 1:-1]
+
+            text_embeddings.append(text_embedding)
+        text_embeddings = torch.concat(text_embeddings, axis=1)
+    else:
+        text_embeddings, text_pool = get_hidden_states(text_encoder, text_input, is_sdxl_text_encoder2, eos, device)
+    return text_embeddings, text_pool
+
+
+def get_weighted_text_embeddings(
+    text_encoder,
+    tokenizer,
+    captions: Union[str, List[str]],
+    negative_captions: Optional[Union[str, List[str]]] = None,
+    max_embeddings_multiples: Optional[int] = 3,
+    no_boseos_middle: Optional[bool] = False,
+    skip_parsing: Optional[bool] = False,
+    skip_weighting: Optional[bool] = False,
+    clip_skip=None,
+    is_sdxl_text_encoder2=False,
+    device=None,
+):
+    device = device or text_encoder.device
+    max_length = (tokenizer.model_max_length - 2) * max_embeddings_multiples + 2
+    if isinstance(captions, str):
+        captions = [captions]
+
+    if not skip_parsing:
+        prompt_tokens, prompt_weights = get_captions_with_weights(tokenizer, captions, max_length - 2)
+        if negative_captions is not None:
+            if isinstance(negative_captions, str):
+                negative_captions = [negative_captions]
+            uncond_tokens, uncond_weights = get_captions_with_weights(tokenizer, negative_captions, max_length - 2)
+    else:
+        prompt_tokens = [token[1:-1] for token in tokenizer(captions, max_length=max_length, truncation=True).input_ids]
+        prompt_weights = [[1.0] * len(token) for token in prompt_tokens]
+        if negative_captions is not None:
+            if isinstance(negative_captions, str):
+                negative_captions = [negative_captions]
+            uncond_tokens = [
+                token[1:-1] for token in tokenizer(negative_captions, max_length=max_length, truncation=True).input_ids
+            ]
+            uncond_weights = [[1.0] * len(token) for token in uncond_tokens]
+
+    # round up the longest length of tokens to a multiple of (model_max_length - 2)
+    max_length = max([len(token) for token in prompt_tokens])
+    if negative_captions is not None:
+        max_length = max(max_length, max([len(token) for token in uncond_tokens]))
+
+    max_embeddings_multiples = min(
+        max_embeddings_multiples,
+        (max_length - 1) // (tokenizer.model_max_length - 2) + 1,
+    )
+    max_embeddings_multiples = max(1, max_embeddings_multiples)
+    max_length = (tokenizer.model_max_length - 2) * max_embeddings_multiples + 2
+
+    # pad the length of tokens and weights
+    bos = tokenizer.bos_token_id
+    eos = tokenizer.eos_token_id
+    pad = tokenizer.pad_token_id
+    prompt_tokens, prompt_weights = pad_tokens_and_weights(
+        prompt_tokens,
+        prompt_weights,
+        max_length,
+        bos,
+        eos,
+        pad,
+        no_boseos_middle=no_boseos_middle,
+        chunk_length=tokenizer.model_max_length,
+    )
+    prompt_tokens = torch.tensor(prompt_tokens, dtype=torch.long, device=device)
+    if negative_captions is not None:
+        uncond_tokens, uncond_weights = pad_tokens_and_weights(
+            uncond_tokens,
+            uncond_weights,
+            max_length,
+            bos,
+            eos,
+            pad,
+            no_boseos_middle=no_boseos_middle,
+            chunk_length=tokenizer.model_max_length,
+        )
+        uncond_tokens = torch.tensor(uncond_tokens, dtype=torch.long, device=device)
+
+    # get the embeddings
+    text_embeddings, text_pool = get_unweighted_text_embeddings(
+        text_encoder,
+        prompt_tokens,
+        tokenizer.model_max_length,
+        clip_skip,
+        eos,
+        pad,
+        is_sdxl_text_encoder2,
+        no_boseos_middle=no_boseos_middle,
+        device=device,
+    )
+    prompt_weights = torch.tensor(prompt_weights, dtype=text_embeddings.dtype, device=device)
+
+    if negative_captions is not None:
+        uncond_embeddings, uncond_pool = get_unweighted_text_embeddings(
+            text_encoder,
+            uncond_tokens,
+            tokenizer.model_max_length,
+            clip_skip,
+            eos,
+            pad,
+            is_sdxl_text_encoder2,
+            no_boseos_middle=no_boseos_middle,
+            device=device,
+        )
+        uncond_weights = torch.tensor(uncond_weights, dtype=uncond_embeddings.dtype, device=device)
+
+    # assign weights to the prompts and normalize in the sense of mean
+    # TODO: should we normalize by chunk or in a whole (current implementation)?
+    if (not skip_parsing) and (not skip_weighting):
+        previous_mean = text_embeddings.float().mean(axis=[-2, -1]).to(text_embeddings.dtype)
+        text_embeddings *= prompt_weights.unsqueeze(-1)
+        current_mean = text_embeddings.float().mean(axis=[-2, -1]).to(text_embeddings.dtype)
+        text_embeddings *= (previous_mean / current_mean).unsqueeze(-1).unsqueeze(-1)
+        if negative_captions is not None:
+            previous_mean = uncond_embeddings.float().mean(axis=[-2, -1]).to(uncond_embeddings.dtype)
+            uncond_embeddings *= uncond_weights.unsqueeze(-1)
+            current_mean = uncond_embeddings.float().mean(axis=[-2, -1]).to(uncond_embeddings.dtype)
+            uncond_embeddings *= (previous_mean / current_mean).unsqueeze(-1).unsqueeze(-1)
+
+    if negative_captions is not None:
+        return text_embeddings, text_pool, uncond_embeddings, uncond_pool
+    return text_embeddings, text_pool, None, None

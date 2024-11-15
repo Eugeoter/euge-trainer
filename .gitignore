@@ -162,15 +162,16 @@ cython_debug/
 # customs
 
 /datasets/
-/models/
-/output/
-/tokenizers/
+/assets/
 /draft*
 wandb/
 *_dev*.py
 *_deprecated*.py
 *_test*.py
 /.bak
-configs/my/
-*controlany*
-ui/
+/configs
+/tools/waifu/eugebooru.py
+/scripts
+/models/*
+/tokenizers/*
+/projects/*

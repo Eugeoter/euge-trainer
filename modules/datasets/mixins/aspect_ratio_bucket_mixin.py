@@ -1,7 +1,8 @@
 import math
 import random
 from typing import List, Dict, Optional, Tuple, Union
-from ...utils import log_utils, dataset_utils
+from waifuset import logging
+from ...utils import dataset_utils
 
 SDXL_BUCKET_SIZES = [
     (512, 1856), (512, 1920), (512, 1984), (512, 2048),
@@ -18,18 +19,27 @@ SDXL_BUCKET_SIZES = [
 
 
 class AspectRatioBucketMixin(object):
-    resolution: Union[Tuple[int, int], int]
+    resolution: Union[Tuple[int, int], int] = None  # auto
     arb: bool = True
     max_aspect_ratio: float = 1.1
     bucket_reso_step: int = 32
     max_width: Optional[int] = None
     max_height: Optional[int] = None
+    max_area: Optional[int] = None
     predefined_buckets: Optional[List[Tuple[int, int]]] = []
 
+    logger: logging.ConsoleLogger
+
     def get_resolution(self):
+        if self.resolution is None:
+            if any(name in self.__class__.__name__.lower() for name in ['sdxl', 'flux', 'hunyuan', 'sd3']):
+                self.resolution = (1024, 1024)
+            else:
+                self.resolution = (512, 512)
+            self.logger.warning(f"resolution not set, using auto-detected resolution: {self.resolution}")
         return self.resolution if isinstance(self.resolution, tuple) else (self.resolution, self.resolution)
 
-    def get_bucket_size(self, img_md, image_size=None):
+    def get_bucket_size(self, img_md, image_size=None) -> Tuple[int, int]:
         if not self.arb:
             return self.get_resolution()
         elif (bucket_size := img_md.get('bucket_size')):
@@ -38,7 +48,7 @@ class AspectRatioBucketMixin(object):
             image_size = dataset_utils.convert_size_if_needed(image_size)
             bucket_size = get_bucket_size(
                 image_size,
-                self.resolution,
+                self.get_resolution(),
                 divisible=self.bucket_reso_step,
                 buckets=self.predefined_buckets,
                 max_width=self.max_width,
@@ -48,11 +58,11 @@ class AspectRatioBucketMixin(object):
         else:
             raise ValueError("Either `bucket_size` or `image_size` must be provided in metadata.")
 
-    def make_buckets(self) -> Dict[Tuple[int, int], List[str]]:
+    def make_buckets(self, dataset) -> Dict[Tuple[int, int], List[str]]:
         if not self.arb:
-            return {self.get_resolution(): list(self.dataset.keys())}
+            return {self.get_resolution(): list(dataset.keys())}
         bucket_keys = {}
-        for img_key, img_md in self.dataset.items():
+        for img_key, img_md in self.logger.tqdm(dataset.items(), desc="make buckets"):
             if (bucket_size := img_md.get('bucket_size')) is not None:
                 pass
             else:
@@ -80,8 +90,13 @@ def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Opti
     """
     reso = reso if isinstance(reso, tuple) else (reso, reso)
     divisible = divisible or 1
+
+    # check if already in the bucket
+    if img_w <= max_width and img_h <= max_height and img_w % divisible == 0 and img_h % divisible == 0 and img_w * img_h <= (max_area := reso[0] * reso[1]):
+        return (img_w, img_h)
+
     img_ar = img_w / img_h
-    around_h = math.sqrt(reso[0]*reso[1] / img_ar)
+    around_h = math.sqrt(max_area / img_ar)
     around_w = img_ar * around_h // divisible * divisible
     if max_width and around_w > max_width:
         around_h = around_h * max_width // around_w
@@ -89,6 +104,8 @@ def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Opti
     elif max_height and around_h > max_height:
         around_w = around_w * max_height // around_h
         around_h = max_height
+    around_h = min(around_h, max_height) if max_height else around_h
+    around_w = min(around_w, max_width) if max_width else around_w
     around_h = int(around_h // divisible * divisible)
     around_w = int(around_w // divisible * divisible)
     return (around_w, around_h)
@@ -132,7 +149,6 @@ def get_bucket_size(
 
     img_w, img_h = image_size
     bucket_w, bucket_h = closest_resolution(buckets, image_size) if buckets else around_reso(img_w, img_h, reso=max_resolution, divisible=divisible, max_width=max_width, max_height=max_height)
-    max_resolution = max(buckets, key=lambda x: x[0]*x[1]) if buckets and max_resolution == -1 else max_resolution
     if not allow_upscale and (img_w < bucket_w or img_h < bucket_h):
         bucket_w = img_w // divisible * divisible
         bucket_h = img_h // divisible * divisible

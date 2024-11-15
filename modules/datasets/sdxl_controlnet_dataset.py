@@ -1,6 +1,6 @@
-from .controlnet_dataset import ControlNetTrainDataset
-from .sdxl_dataset import SDXLTrainDataset
+from .controlnet_dataset import ControlNetDataset
+from .sdxl_dataset import SDXLDataset
 
 
-class SDXLControlNetTrainDataset(ControlNetTrainDataset, SDXLTrainDataset):
+class SDXLControlNetDataset(ControlNetDataset, SDXLDataset):
     pass

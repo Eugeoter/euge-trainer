@@ -1,18 +1,171 @@
 import torch
 import importlib
-import warnings
 import transformers
 from typing import Optional
 from torch.optim.optimizer import Optimizer
 from transformers import SchedulerType
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers.optimization import TYPE_TO_SCHEDULER_FUNCTION
-from . import log_utils, advanced_train_utils
+from waifuset import logging
 
-logger = log_utils.get_logger("train")
+logger = logging.get_logger("train")
 
 
-VAE_SCALE_FACTOR = 0.18215
+class LossRecorder:
+    r"""
+    Class to record better losses.
+    """
+
+    def __init__(self, gamma=0.9, max_window=None):
+        self.losses = []
+        self.gamma = gamma
+        self.ema = 0
+        self.t = 0
+        self.max_window = max_window
+
+    def add(self, *, loss: float) -> None:
+        self.losses.append(loss)
+        if self.max_window is not None and len(self.losses) > self.max_window:
+            self.losses.pop(0)
+        self.t += 1
+        self.ema = self.ema * self.gamma + loss * (1 - self.gamma)
+
+    def moving_average(self, *, window: int) -> float:
+        if len(self.losses) < window:
+            window = len(self.losses)
+        return sum(self.losses[-window:]) / window
+
+
+def deepspeed_config_from_config(config, global_batch_size):
+    if config.use_zero_stage == 2:
+        deepspeed_config = {
+            "train_batch_size": global_batch_size,
+            "train_micro_batch_size_per_gpu": config.batch_size,
+            "gradient_accumulation_steps": config.gradient_accumulation_steps,
+            "steps_per_print": 100,
+            "optimizer": {
+                "type": config.optimizer_type,
+                "params": {
+                    "lr": config.learning_rate,
+                    **config.optimizer_kwargs,
+                }
+            },
+
+            "zero_optimization": {
+                "stage": 2,
+                "reduce_scatter": False,
+                "reduce_bucket_size": 1e9,
+            },
+
+            "gradient_clipping": 1.0,
+            "prescale_gradients": True,
+
+            "fp16": {
+                "enabled": config.mixed_precision == "fp16",
+                "loss_scale": 0,
+                "loss_scale_window": 500,
+                "hysteresis": 2,
+                "min_loss_scale": 1e-3,
+                "initial_scale_power": 15
+            },
+
+            "bf16": {
+                "enabled": config.mixed_precision == "bf16",
+                "loss_scale": 0,
+                "loss_scale_window": 500,
+                "hysteresis": 2,
+                "min_loss_scale": 1e-3,
+                "initial_scale_power": 15
+            },
+
+            "wall_clock_breakdown": False
+        }
+        if config.cpu_offloading == True:
+            deepspeed_config["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
+            deepspeed_config["zero_optimization"]["offload_parameter"] = {"device": "cpu", "pin_memory": True}
+
+    elif config.use_zero_stage == 3:
+        deepspeed_config = {
+            "train_batch_size": config.global_batch_size,
+            # "train_micro_batch_size_per_gpu": args.batch_size,
+            "gradient_accumulation_steps": config.gradient_accumulation_steps,
+            "steps_per_print": 100,
+
+            "optimizer": {
+                "type": config.optimizer_type,
+                "params": {
+                    "lr": config.learning_rate,
+                    **config.optimizer_kwargs,
+                }
+            },
+
+            "zero_optimization": {
+                "stage": 3,
+                "allgather_partitions": True,
+                "overlap_comm": True,
+                "reduce_scatter": True,
+                "contiguous_gradients": True,
+                "stage3_prefetch_bucket_size": 5e8,
+                "stage3_max_live_parameters": 6e8,
+                "reduce_bucket_size": 1.2e9,
+                "sub_group_size": 1e9,
+                "sub_group_buffer_num": 10,
+                "pipeline_optimizer": True,
+                "max_contigous_event_size": 0,
+                "cache_sub_group_rate": 0.0,
+                "prefetch_cache_sub_group_rate": 1.0,
+                "max_contigous_params_size": -1,
+                "max_param_reduce_events": 0,
+                "stage3_param_persistence_threshold": 9e9,
+                "is_communication_time_profiling": False,
+                "save_large_model_multi_slice": True,
+                "use_fused_op_with_grad_norm_overflow": False,
+            },
+
+            "gradient_clipping": 1.0,
+            "prescale_gradients": False,
+
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "loss_scale_window": 500,
+                "hysteresis": 2,
+                "min_loss_scale": 1,
+                "initial_scale_power": 15
+            },
+
+            "bf16": {
+                "enabled": False
+            },
+
+            "wall_clock_breakdown": False,
+            "mem_chunk": {
+                "default_chunk_size": 536870911,
+                "use_fake_dist": False,
+                "client": {
+                    "mem_tracer": {
+                        "use_async_mem_monitor": True,
+                        "warmup_gpu_chunk_mem_ratio": 0.8,
+                        "overall_gpu_mem_ratio": 0.8,
+                        "overall_cpu_mem_ratio": 1.0,
+                        "margin_use_ratio": 0.8,
+                        "use_fake_dist": False
+                    },
+                    "opts": {
+                        "with_mem_cache": True,
+                        "with_async_move": True
+                    }
+                }
+            }
+        }
+        if config.cpu_offloading == True:
+            deepspeed_config["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
+            deepspeed_config["zero_optimization"]["offload_parameter"] = {"device": "cpu", "pin_memory": True}
+
+    else:
+        raise ValueError
+
+    return deepspeed_config
 
 
 def append_lr_to_logs_with_names(logs, lr_scheduler, optimizer_type, names):
@@ -242,6 +395,12 @@ def get_optimizer(config, trainable_params):
         optimizer_class = torch.optim.AdamW
         optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
+    elif optimizer_type == "StochasticAdamW".lower():
+        logger.print(f"use StochasticAdamW optimizer | {optimizer_kwargs}")
+        from torchastic import AdamW as StochasticAdamW
+        optimizer_class = StochasticAdamW
+        optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
+
     if optimizer is None:
         # 任意のoptimizerを使う
         optimizer_type = config.optimizer_type  # lowerでないやつ（微妙）
@@ -297,6 +456,7 @@ def get_scheduler_fix(config, optimizer: Optimizer, num_train_steps):
         raise ValueError(f"{name} requires `num_warmup_steps`, please provide that argument.")
 
     if name == SchedulerType.CONSTANT_WITH_WARMUP:
+        # logger.debug(f"optimizer: {optimizer}, num_warmup_steps: {num_warmup_steps}, lr_scheduler_kwargs: {lr_scheduler_kwargs}")
         return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, **lr_scheduler_kwargs)
 
     # All other schedulers require `num_training_steps`
@@ -327,20 +487,6 @@ def patch_accelerator_for_fp16_training(accelerator):
         return org_unscale_grads(optimizer, inv_scale, found_inf, True)
 
     accelerator.scaler._unscale_grads_ = _unscale_grads_replacer
-
-
-def prepare_scheduler_for_custom_training(noise_scheduler, device):
-    if hasattr(noise_scheduler, "all_snr"):
-        return
-
-    alphas_cumprod = noise_scheduler.alphas_cumprod
-    sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-    sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
-    alpha = sqrt_alphas_cumprod
-    sigma = sqrt_one_minus_alphas_cumprod
-    all_snr = (alpha / sigma) ** 2  # = alpha^2 / (1 - alpha^2)
-
-    noise_scheduler.all_snr = all_snr.to(device)
 
 
 def prepare_dtype(config):
@@ -376,138 +522,52 @@ def match_mixed_precision(config, weight_dtype):
         return None
 
 
-def get_input_ids(caption, tokenizer, max_token_length):
-    input_ids = tokenizer(
-        caption, padding="max_length", truncation=True, max_length=max_token_length, return_tensors="pt"
-    ).input_ids
-
-    if max_token_length > tokenizer.model_max_length:
-        input_ids = input_ids.squeeze(0)
-        ids_list = []
-        if tokenizer.pad_token_id == tokenizer.eos_token_id:
-            # v1
-            # 77以上の時は "<BOS> .... <EOS> <EOS> <EOS>" でトータル227とかになっているので、"<BOS>...<EOS>"の三連に変換する
-            # 1111氏のやつは , で区切る、とかしているようだが　とりあえず単純に
-            for i in range(0, max_token_length + 2 - tokenizer.model_max_length + 2, tokenizer.model_max_length - 2):  # (1, 152, 75)
-                ids_chunk = (
-                    input_ids[0].unsqueeze(0),
-                    input_ids[i: i + tokenizer.model_max_length - 2],
-                    input_ids[-1].unsqueeze(0),
-                )
-                ids_chunk = torch.cat(ids_chunk)
-                ids_list.append(ids_chunk)
-        else:
-            # v2 or SDXL
-            # 77以上の時は "<BOS> .... <EOS> <PAD> <PAD>..." でトータル227とかになっているので、"<BOS>...<EOS> <PAD> <PAD> ..."の三連に変換する
-            for i in range(0, max_token_length + 2 - tokenizer.model_max_length + 2, tokenizer.model_max_length - 2):
-                ids_chunk = (
-                    input_ids[0].unsqueeze(0),  # BOS
-                    input_ids[i: i + tokenizer.model_max_length - 2],
-                    input_ids[-1].unsqueeze(0),
-                )  # PAD or EOS
-                ids_chunk = torch.cat(ids_chunk)
-
-                # 末尾が <EOS> <PAD> または <PAD> <PAD> の場合は、何もしなくてよい
-                # 末尾が x <PAD/EOS> の場合は末尾を <EOS> に変える（x <EOS> なら結果的に変化なし）
-                if ids_chunk[-2] != tokenizer.eos_token_id and ids_chunk[-2] != tokenizer.pad_token_id:
-                    ids_chunk[-1] = tokenizer.eos_token_id
-                # 先頭が <BOS> <PAD> ... の場合は <BOS> <EOS> <PAD> ... に変える
-                if ids_chunk[1] == tokenizer.pad_token_id:
-                    ids_chunk[1] = tokenizer.eos_token_id
-
-                ids_list.append(ids_chunk)
-
-        input_ids = torch.stack(ids_list)  # 3,77
-        return input_ids
-
-
-def get_hidden_states(input_ids, tokenizer, text_encoder, weight_dtype=None, v2=False, clip_skip=None, max_token_length=None):
-    # with no_token_padding, the length is not max length, return result immediately
-    if input_ids.size()[-1] != tokenizer.model_max_length:
-        return text_encoder(input_ids)[0]
-
-    # input_ids: b,n,77
-    b_size = input_ids.size()[0]
-    input_ids = input_ids.reshape((-1, tokenizer.model_max_length))  # batch_size*3, 77
-
-    if clip_skip is None:
-        encoder_hidden_states = text_encoder(input_ids)[0]
-    else:
-        enc_out = text_encoder(input_ids, output_hidden_states=True, return_dict=True)
-        encoder_hidden_states = enc_out["hidden_states"][-clip_skip]
-        encoder_hidden_states = text_encoder.text_model.final_layer_norm(encoder_hidden_states)
-
-    # bs*3, 77, 768 or 1024
-    encoder_hidden_states = encoder_hidden_states.reshape((b_size, -1, encoder_hidden_states.shape[-1]))
-
-    if max_token_length is not None:
-        if v2:
-            # v2: <BOS>...<EOS> <PAD> ... の三連を <BOS>...<EOS> <PAD> ... へ戻す　正直この実装でいいのかわからん
-            states_list = [encoder_hidden_states[:, 0].unsqueeze(1)]  # <BOS>
-            for i in range(1, max_token_length, tokenizer.model_max_length):
-                chunk = encoder_hidden_states[:, i: i + tokenizer.model_max_length - 2]  # <BOS> の後から 最後の前まで
-                if i > 0:
-                    for j in range(len(chunk)):
-                        if input_ids[j, 1] == tokenizer.eos_token:  # 空、つまり <BOS> <EOS> <PAD> ...のパターン
-                            chunk[j, 0] = chunk[j, 1]  # 次の <PAD> の値をコピーする
-                states_list.append(chunk)  # <BOS> の後から <EOS> の前まで
-            states_list.append(encoder_hidden_states[:, -1].unsqueeze(1))  # <EOS> か <PAD> のどちらか
-            encoder_hidden_states = torch.cat(states_list, dim=1)
-        else:
-            # v1: <BOS>...<EOS> の三連を <BOS>...<EOS> へ戻す
-            states_list = [encoder_hidden_states[:, 0].unsqueeze(1)]  # <BOS>
-            for i in range(1, max_token_length, tokenizer.model_max_length):
-                states_list.append(encoder_hidden_states[:, i: i + tokenizer.model_max_length - 2])  # <BOS> の後から <EOS> の前まで
-            states_list.append(encoder_hidden_states[:, -1].unsqueeze(1))  # <EOS>
-            encoder_hidden_states = torch.cat(states_list, dim=1)
-
-    if weight_dtype is not None:
-        # this is required for additional network training
-        encoder_hidden_states = encoder_hidden_states.to(weight_dtype)
-
-    return encoder_hidden_states
-
-
-def apply_weighted_noise(noise, mask, weight, normalize=True):
-    # noise is [H, W, C] and mask is [H, W]
-    mask = torch.stack([mask] * noise.shape[1], dim=1)
-    noise = torch.where(mask > 0, noise * weight, noise)
-    if normalize:
-        noise = noise / noise.std()
-    return noise
-
-
 def n_params(module):
     return sum(param.numel() for param in module.parameters())
 
 
-def ignore_warnings(categories=[FutureWarning, DeprecationWarning]):
-    for category in categories:
-        warnings.filterwarnings("ignore", category=category)
+def conditional_loss(
+    model_pred: torch.Tensor,
+    target: torch.Tensor,
+    reduction: str = "mean",
+    loss_type: str = "l2",
+    huber_c: float = 0.1,
+    alphas_cumprod=None,  # ew
+    timesteps=None,  # ew & cmse
+    loss_map=None,  # cmse
+    c_step=None,  # ew
+    sched_train_steps=None,  # ew
+):
 
+    if loss_type == "l2":
+        loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
+    elif loss_type == "huber":
+        loss = 2 * huber_c * (torch.sqrt((model_pred - target) ** 2 + huber_c**2) - huber_c)
+        if reduction == "mean":
+            loss = torch.mean(loss)
+        elif reduction == "sum":
+            loss = torch.sum(loss)
+    elif loss_type == "smooth_l1":
+        loss = 2 * (torch.sqrt((model_pred - target) ** 2 + huber_c**2) - huber_c)
+        if reduction == "mean":
+            loss = torch.mean(loss)
+        elif reduction == "sum":
+            loss = torch.sum(loss)
+    elif loss_type == "cmse":
+        from .advanced_train_utils import adaptive_clustered_mse_loss
+        loss = adaptive_clustered_mse_loss(model_pred, target, timesteps, loss_map, reduction=reduction)
+    elif loss_type == "ew":
+        from .advanced_train_utils import exponential_weighted_loss
+        loss = exponential_weighted_loss(model_pred, target, alphas_cumprod, timesteps, loss_map, reduction="none")
+        mse_loss = torch.nn.functional.mse_loss(model_pred, target, reduction=reduction)
 
-class LossRecorder:
-    r"""
-    Class to record better losses.
-    """
+        schedule_start = 1
+        schedule_move = -2
+        interpolate_loss = schedule_start + (schedule_move * (c_step/sched_train_steps))
+        if interpolate_loss < 0:
+            interpolate_loss = 0
+        loss = (loss * interpolate_loss) + (mse_loss * (1 - interpolate_loss))
 
-    def __init__(self, gamma=0.9, max_window=None):
-        self.losses = []
-        self.gamma = gamma
-        self.ema = 0
-        self.t = 0
-        self.max_window = max_window
-
-    def add(self, *, loss: float) -> None:
-        self.losses.append(loss)
-        if self.max_window is not None and len(self.losses) > self.max_window:
-            self.losses.pop(0)
-        self.t += 1
-        ema = self.ema * self.gamma + loss * (1 - self.gamma)
-        ema_hat = ema / (1 - self.gamma ** self.t) if self.t < 500 else ema
-        self.ema = ema_hat
-
-    def moving_average(self, *, window: int) -> float:
-        if len(self.losses) < window:
-            window = len(self.losses)
-        return sum(self.losses[-window:]) / window
+    else:
+        raise NotImplementedError(f"Unsupported Loss Type {loss_type}")
+    return loss

@@ -2,20 +2,14 @@ import io
 import struct
 import re
 import cv2
+import random
 import os
 import numpy as np
-import functools
-import huggingface_hub.utils
-import requests
 from ml_collections import ConfigDict
 from PIL import Image, ExifTags
-from typing import Tuple, Union, Literal, List
+from typing import Tuple, Union, Literal
 from torchvision import transforms
-from waifuset.classes import DictDataset, DictData
-from ..utils import log_utils
 
-logger = log_utils.get_logger("dataset")
-NETWORK_EXCEPTIONS = (huggingface_hub.utils._errors.HfHubHTTPError, ConnectionError, requests.exceptions.HTTPError)
 IMAGE_TRANSFORMS = transforms.Compose(
     [
         transforms.ToTensor(),
@@ -23,189 +17,33 @@ IMAGE_TRANSFORMS = transforms.Compose(
     ]
 )
 
+RESAMPLING_METHODS = {
+    "nearest": (Image.NEAREST, cv2.INTER_NEAREST),
+    "box": (Image.BOX, cv2.INTER_AREA),
+    "bilinear": (Image.BILINEAR, cv2.INTER_LINEAR),
+    "hamming": (Image.HAMMING, cv2.INTER_LINEAR),
+    "bicubic": (Image.BICUBIC, cv2.INTER_CUBIC),
+    "lanczos": (Image.LANCZOS, cv2.INTER_LANCZOS4),
+}
+
 
 def cfg(**kwargs):
     return ConfigDict(initial_dictionary=kwargs)
 
 
-def patch_image_key(dataset):
-    for img_key, img_md in dataset.items():
-        img_md['image_key'] = img_key
-    return dataset
-
-
-def accumulate_datasets(datasets):
-    pivotset, datasets = datasets[0], datasets[1:]
-    for ds in datasets:
-        for img_key, new_img_md in ds.items():
-            if (old_img_md := pivotset.get(img_key)) is not None:
-                old_img_md.update(new_img_md)
-                if issubclass(new_img_md.__class__, old_img_md.__class__):
-                    new_img_md.update(old_img_md)
-                    pivotset[img_key] = new_img_md
-            else:
-                pivotset[img_key] = new_img_md
-    return pivotset
-
-
-def load_local_dataset(metadata_files, image_dirs, fp_key='image_path', recur=True, tbname='metadata', primary_key='image_key', exts=None, **kwargs) -> DictDataset:
-    from waifuset.classes import AutoDataset, DirectoryDataset
-    from waifuset.tools import mapping
-    metaset_kwargs = dict(
-        fp_key=fp_key,
-        recur=recur,
-        tbname=tbname,
-        primary_key=primary_key,
-        exts=exts,
-    )
-    metaset_kwargs.update(kwargs)
-    if metadata_files:
-        # load metaset from metadata files
-        metaset: DictDataset = functools.reduce(lambda x, y: x + y, [
-            DictDataset.from_dataset(AutoDataset(mdfile, **metaset_kwargs))
-            for mdfile in metadata_files
-        ])
-        if image_dirs:
-            # load dirset from image dirs
-            dirset = functools.reduce(lambda x, y: x + y, [
-                DirectoryDataset.from_disk(source, **metaset_kwargs)
-                for source in image_dirs
-            ])
-            # set image_path in metaset to the path in dirset
-            metaset.apply_map(mapping.redirect_columns, columns=[fp_key], tarset=dirset)
-        # filter out the data that doesn't exist or without image_path
-        metaset = metaset.subset(lambda x: fp_key in x and os.path.exists(x[fp_key]))
-        # convert windows path to posix path (for linux)
-        metaset.apply_map(mapping.as_posix_path, columns=[fp_key])
-    elif image_dirs:
-        from waifuset.classes.data.data_utils import read_attrs
-        # read metaset (= dirset) from image dirs
-        metaset = functools.reduce(lambda x, y: x + y, [
-            DirectoryDataset.from_disk(source, **metaset_kwargs)
-            for source in image_dirs
-        ])
-        metaset = DictDataset.from_dataset(metaset)
-
-        if fp_key == 'image_path':  # read metadata of image data
-            def read_data_attr(img_md):
-                attrs = read_attrs(img_md[fp_key])
-                img_md.update(attrs)
-                return img_md
-            metaset.apply_map(read_data_attr)
+def get_platform() -> Literal['Windows', 'Linux', 'macOS', 'Other POSIX', 'Unknown']:
+    if os.name == 'nt':
+        return "Windows"
+    elif os.name == 'posix':
+        import platform
+        if platform.system() == 'Linux':
+            return "Linux"
+        elif platform.system() == 'Darwin':
+            return "macOS"
+        else:
+            return "Other POSIX"
     else:
-        raise ValueError("metadata_files or image_dirs must be provided.")
-    metaset.apply_map(mapping.patch_image_key)
-    return metaset
-
-
-class HuggingFaceData(DictData):
-    def __init__(
-        self,
-        host,
-        index,
-        **kwargs,
-    ):
-        self.host = host
-        self.index = index
-        super().__init__(**kwargs)
-
-    def get(self, key, default=None):
-        if key in self.host.column_names:
-            return self.host[self.index].get(key, default)
-        return super().get(key, default)
-
-    def __getattr__(self, name):
-        if name in self.host.column_names:
-            return self.host[self.index][name]
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-
-    def __getitem__(self, key):
-        if key in self.host.column_names:
-            return self.host[self.index][key]
-        return super().__getitem__(key)
-
-
-def load_huggingface_dataset(name_or_path, cache_dir=None, split='train', primary_key='image_key', column_mapping=None, hf_token=None, max_retries=None) -> DictDataset:
-    r"""
-    Load dataset from HuggingFace and convert it to DictDataset.
-    """
-    import datasets
-    retries = 0
-    while True:
-        try:
-            hfset: datasets.Dataset = datasets.load_dataset(
-                name_or_path,
-                cache_dir=cache_dir,
-                split=split,
-                token=hf_token,
-            )
-            break
-        except NETWORK_EXCEPTIONS:
-            logger.print(log_utils.yellow(f"Connection error when downloading dataset `{name_or_path}` from HuggingFace. Retrying..."))
-            if max_retries is not None and retries >= max_retries:
-                raise
-            retries += 1
-            pass
-
-    if '__key__' in hfset.column_names:
-        column_mapping['__key__'] = primary_key
-    if column_mapping:
-        hfset = hfset.remove_columns([k for k in hfset.column_names if k not in column_mapping])
-        hfset = hfset.rename_columns({k: v for k, v in column_mapping.items() if k != v and k in hfset.column_names})
-    dic = {}
-    if primary_key not in hfset.column_names:
-        for index in range(len(hfset)):
-            img_key = str(index)
-            dic[img_key] = HuggingFaceData(hfset, index=index, **{primary_key: img_key})
-    else:
-        for index, img_key in enumerate(hfset[primary_key]):
-            dic[img_key] = HuggingFaceData(hfset, index=index, **{primary_key: img_key})
-    return DictDataset.from_dict(dic)
-
-
-def load_image_directory_dataset(
-    image_directory: List[str],
-    fp_key='image_path',
-    recur=True,
-    exts=None,
-    **kwargs,
-):
-    from waifuset.classes import DirectoryDataset
-    dirset = DirectoryDataset.from_disk(image_directory, fp_key=fp_key, recur=recur, exts=exts, **kwargs)
-    dirset = patch_image_key(dirset)
-    return dirset
-
-
-def load_metadata_dataset(
-    metadata_file: str,
-    fp_key='image_path',
-    recur=True,
-    exts=None,
-    tbname='metadata',
-    primary_key='image_key',
-    **kwargs,
-):
-    from waifuset.classes import AutoDataset, DictDataset, DirectoryDataset
-    metaset = AutoDataset(
-        metadata_file,
-        fp_key=fp_key,
-        recur=recur,
-        tbname=tbname,
-        primary_key=primary_key,
-        exts=exts,
-        **kwargs,
-    )
-    if isinstance(metaset, DirectoryDataset):  # read metadata from txt or json files
-        from waifuset.classes.data.data_utils import read_attrs
-
-        def read_data_attr(img_md):
-            attrs = read_attrs(img_md[fp_key])
-            img_md.update(attrs)
-            return img_md
-        metaset.apply_map(read_data_attr)
-
-    metaset = patch_image_key(metaset)
-    return DictDataset.from_dataset(metaset)
+        return "Unknown"
 
 
 def load_image(image_path, type: Literal['pil', 'numpy'] = 'numpy', mode: str = 'RGB'):
@@ -276,18 +114,53 @@ def convert_to_rgb(image: Union[Image.Image, np.ndarray], bg_color=(255, 255, 25
         return image[:, :, :3]
 
 
-def resize_if_needed(image: Union[Image.Image, np.ndarray], target_size: Tuple[int, int]):
-    if isinstance(image, Image.Image):
-        if image.width != target_size[0] or image.height != target_size[1]:
-            image = image.resize(target_size, Image.Resampling.LANCZOS)
-    elif isinstance(image, np.ndarray):  # (H, W, C)
-        if image.shape[1] != target_size[0] or image.shape[0] != target_size[1]:
-            image = cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
+def color_aug(image: np.ndarray) -> np.ndarray:
+    # self.color_aug_method = albu.OneOf(
+    #     [
+    #         albu.HueSaturationValue(8, 0, 0, p=0.5),
+    #         albu.RandomGamma((95, 105), p=0.5),
+    #     ],
+    #     p=0.33,
+    # )
+    hue_shift_limit = 8
+
+    # remove dependency to albumentations
+    if random.random() <= 0.33:
+        if random.random() > 0.5:
+            # hue shift
+            hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            hue_shift = random.uniform(-hue_shift_limit, hue_shift_limit)
+            if hue_shift < 0:
+                hue_shift = 180 + hue_shift
+            hsv_img[:, :, 0] = (hsv_img[:, :, 0] + hue_shift) % 180
+            image = cv2.cvtColor(hsv_img, cv2.COLOR_HSV2BGR)
+        else:
+            # random gamma
+            gamma = random.uniform(0.95, 1.05)
+            image = np.clip(image**gamma, 0, 255).astype(np.uint8)
+
     return image
 
 
+def resize_if_needed(image: Union[Image.Image, np.ndarray], target_size: Tuple[int, int], resampling='lanczos'):
+    if isinstance(image, Image.Image):
+        if image.width != target_size[0] or image.height != target_size[1]:
+            image = image.resize(target_size, resample=get_resampling(resampling, 'pil'))
+    elif isinstance(image, np.ndarray):  # (H, W, C)
+        if image.shape[1] != target_size[0] or image.shape[0] != target_size[1]:
+            image = cv2.resize(image, target_size, interpolation=get_resampling(resampling, 'numpy'))
+    return image
+
+
+def get_resampling(resampling: str, type: Literal['pil', 'numpy'] = 'numpy'):
+    if resampling not in RESAMPLING_METHODS:
+        raise ValueError(f"Unknown resampling method: {resampling}, available methods: {', '.join(RESAMPLING_METHODS.keys())}")
+    return RESAMPLING_METHODS[resampling][0 if type == 'pil' else 1]
+
+
 def crop_ltrb_if_needed(image: Union[Image.Image, np.ndarray], crop_ltrb):
-    if crop_ltrb != (0, 0, 0, 0):
+    wid, hei = image.size if isinstance(image, Image.Image) else (image.shape[1], image.shape[0])
+    if crop_ltrb != (0, 0, wid, hei):
         if isinstance(image, Image.Image):
             image = image.crop(crop_ltrb)
         else:
