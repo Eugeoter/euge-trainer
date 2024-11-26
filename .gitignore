@@ -169,7 +169,7 @@ wandb/
 *_deprecated*.py
 *_test*.py
 /.bak
-/configs
+/configs/config_*.py
 /tools/waifu/eugebooru.py
 /scripts
 /models/*
