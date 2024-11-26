@@ -9,18 +9,27 @@ from ..utils import eval_utils, device_utils, sd15_model_utils, lora_utils
 class SD15LoRAAdapterTrainState(SD15TrainState):
     def save_diffusion_model(self) -> str:
         save_path = os.path.join(self.output_model_dir, f"{self.output_name['models']}_ep{self.epoch}_step{self.global_step}.safetensors")
-        nnet_with_merge = self.accelerator.unwrap_model(self.nnet_with_merge)
-        text_encoder_with_merge = self.accelerator.unwrap_model(self.text_encoder_with_merge)
-        for module_name, module in zip(self.lora_name_to_module_name.values(), self.lora_name_to_module.value()):
-            module_with_merge = self.accelerator.unwrap_model(module)
-            module_with_merge = module_with_merge.merged_module()
-            if not isinstance(module, (nn.Linear, nn.Conv2d)):
-                raise ValueError(f"LoRA module must be either nn.Linear or nn.Conv2d, got {type(module)}")
-            lora_utils.set_module_by_name([nnet_with_merge, text_encoder_with_merge], module_name, module_with_merge)
+
+        nnet_with_merge = copy.deepcopy(self.nnet.to('cpu'))
+        text_encoder_with_merge = copy.deepcopy(self.text_encoder.to('cpu'))
+
+        lora_name_to_save_module = lora_utils.make_lora_name_to_module_map([nnet_with_merge, text_encoder_with_merge], model_type=self.model_type)
+        for lora_name in self.lora_name_to_module.keys():
+            save_module = lora_name_to_save_module[lora_name]
+            wrapper = self.lora_name_to_module[lora_name]
+            wrapper = wrapper.to('cpu')
+            merged_weight = wrapper.merged_weight()
+            assert isinstance(save_module, (nn.Linear, nn.Conv2d)), f"save_module must be nn.Linear or nn.Conv2d, but got {save_module.__class__.__name__}"
+            assert wrapper.module.__class__.__name__ == save_module.__class__.__name__, f"{wrapper.module.__class__.__name__} != {save_module.__class__.__name__}"
+            assert wrapper.module.weight.data.shape == save_module.weight.data.shape, f"{wrapper.module.weight.data.shape} != {save_module.weight.data.shape}"
+            assert merged_weight.shape == save_module.weight.data.shape, f"{merged_weight.shape} != {save_module.weight.data.shape}"
+            save_module.weight.data = merged_weight
+            wrapper = wrapper.to(self.device)
+
         sd15_model_utils.save_stable_diffusion_checkpoint(
             output_file=save_path,
-            unet=self.accelerator.unwrap_model(self.nnet_with_merge),
-            text_encoder=self.accelerator.unwrap_model(self.text_encoder_with_merge),
+            unet=nnet_with_merge,
+            text_encoder=text_encoder_with_merge,
             epochs=self.epoch,
             steps=self.global_step,
             ckpt_path=None,
@@ -31,6 +40,17 @@ class SD15LoRAAdapterTrainState(SD15TrainState):
             use_mem_eff_save=self.use_mem_eff_save,
         )
         self.logger.info(f"Diffusion model saved to: `{logging.yellow(save_path)}`")
+
+        # try:
+        #     sd15_model_utils.load_models_from_stable_diffusion_checkpoint(save_path, device='cpu')
+        #     self.logger.info(logging.green("Diffusion model loaded and tested successfully"))
+        # except:
+        #     raise
+
+        # To original device
+        self.nnet.to(self.device)
+        self.text_encoder.to(self.device)
+
         return save_path
 
     def get_pipeline(self):

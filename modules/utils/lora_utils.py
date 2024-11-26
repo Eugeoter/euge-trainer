@@ -329,6 +329,16 @@ def merge_loras_to_model(
     return models
 
 
+def get_module_by_name(models, module_name):
+    for model in models.values():
+        modules = dict(model.named_modules())
+        if module_name in modules:
+            return modules[module_name]
+    else:
+        raise ValueError(f"Module {module_name} not found in {modules.keys()}")
+    return None
+
+
 def set_module_by_name(models, module_name, new_module):
     for model in models.values():
         modules = dict(model.named_modules())

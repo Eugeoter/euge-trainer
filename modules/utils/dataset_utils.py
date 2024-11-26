@@ -160,6 +160,9 @@ def get_resampling(resampling: str, type: Literal['pil', 'numpy'] = 'numpy'):
 
 def crop_ltrb_if_needed(image: Union[Image.Image, np.ndarray], crop_ltrb):
     wid, hei = image.size if isinstance(image, Image.Image) else (image.shape[1], image.shape[0])
+    # if crop_ltrb exceeds the image size, raise an error
+    if crop_ltrb[0] < 0 or crop_ltrb[1] < 0 or crop_ltrb[2] > wid or crop_ltrb[3] > hei:
+        raise ValueError(f"crop_ltrb {crop_ltrb} exceeds the image size {wid}x{hei}")
     if crop_ltrb != (0, 0, wid, hei):
         if isinstance(image, Image.Image):
             image = image.crop(crop_ltrb)

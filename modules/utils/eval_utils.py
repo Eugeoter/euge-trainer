@@ -180,10 +180,10 @@ def prepare_param(param):
                 control_image = Image.open(control_image_path)
             else:
                 raise ValueError(f"control image not found")
-        param['control_image'] = control_image.convert('RGB')
     elif (control_image_path := param.get('control_image_path')) is not None:
         control_image = Image.open(control_image_path).convert('RGB')
-        param['control_image'] = control_image
+    else:
+        control_image = None
     param["height"] = height
     param["width"] = width
     param["generator"] = torch.Generator().manual_seed(param["seed"])
@@ -312,7 +312,8 @@ def sample_during_train(
                     pipeline_input['height'] = control_image.height // 8 * 8
                 else:
                     if 'control' in pipeline.__class__.__name__.lower():
-                        logger.warning(f"pipeline {pipeline.__class__.__name__} looks like a controlnet-related pipeline but control condition is not provided")
+                        logger.warning(f"Pipeline {pipeline.__class__.__name__} looks like a controlnet-related pipeline but control condition is not provided")
+
                 output = pipeline(**pipeline_input)
 
             # save image
@@ -333,6 +334,10 @@ def sample_during_train(
                 if wandb_run is not None:
                     wandb_run.log({img_filename: wandb.Image(image)}, step=steps)
                 if is_controlnet:
+                    control_image.save(os.path.join(sample_dir, f"{sample_name}_control-{num_suffix}-{i}-{j}.png"))
+                    if wandb_run is not None:
+                        wandb_run.log({f"control_image-{num_suffix}-{i}-{j}.png": wandb.Image(control_image)}, step=steps)
+
                     image_overlaid = overlaid_image(image, control_image)
                     overlaid_filename = f"{sample_name}_overlaid-{num_suffix}-{i}-{j}.png"
                     image_overlaid.save(os.path.join(sample_dir, overlaid_filename))

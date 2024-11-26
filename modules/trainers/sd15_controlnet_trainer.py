@@ -1,4 +1,5 @@
 import torch
+import os
 from torch import nn
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.models.controlnet import ControlNetModel
@@ -33,11 +34,20 @@ class SD15ControlNetTrainer(SD15Trainer):
 
     def load_controlnet_model(self):
         if self.controlnet_model_name_or_path is not None:
-            controlnet = self.controlnet_class.from_pretrained(self.controlnet_model_name_or_path)
-            self.logger.info(f"controlnet model loaded from {self.controlnet_model_name_or_path}")
+            self.logger.info(f"Loading controlnet model from {self.controlnet_model_name_or_path}")
+            if os.path.isfile(self.controlnet_model_name_or_path):
+                controlnet = self.controlnet_class.from_single_file(
+                    self.controlnet_model_name_or_path,
+                    use_safetensors=os.path.splitext(self.controlnet_model_name_or_path)[1] == ".safetensors",
+                )
+            elif os.path.isdir(self.controlnet_model_name_or_path):
+                controlnet = self.controlnet_class.from_pretrained(self.controlnet_model_name_or_path)
+            else:
+                raise ValueError(f"Invalid controlnet model name or path: {self.controlnet_model_name_or_path}")
+            self.logger.info(f"Controlnet model loaded from {self.controlnet_model_name_or_path}")
         else:
             controlnet = self.controlnet_class.from_unet(self.nnet)
-            self.logger.info(f"controlnet model initialized from nnet")
+            self.logger.info(f"Controlnet model initialized from nnet")
         return {"controlnet": controlnet}
 
     def enable_xformers(self):

@@ -176,7 +176,7 @@ class SD15TrainState(BaseTrainState):
                     sample_name=f"train_{img_md['image_key']}",
                 )
                 if is_controlnet:
-                    sample['control_image'] = self.train_dataset.get_control_image(img_md, type='pil').convert('RGB')
+                    sample['control_image'] = self.train_dataset.get_control_image(img_md, type='pil')
                 samples.append(sample)
 
             if self.valid_dataset is not None:
@@ -195,6 +195,6 @@ class SD15TrainState(BaseTrainState):
                         sample_name=f"valid_{img_md['image_key']}",
                     )
                     if is_controlnet:
-                        sample['control_image'] = self.valid_dataset.get_control_image(img_md, type='pil').convert('RGB')
+                        sample['control_image'] = self.valid_dataset.get_control_image(img_md, type='pil')
                     samples.append(sample)
             return samples

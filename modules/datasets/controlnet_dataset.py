@@ -1,6 +1,7 @@
 import torch
 import io
 import os
+import random
 import numpy as np
 from PIL import Image
 from torchvision import transforms
@@ -68,9 +69,9 @@ class ControlNetDataset(T2IDataset):
         return os.path.join(self.control_image_cache_dir, f"{img_md['image_key']}.png")
 
     def open_control_image(self, img_md) -> Image.Image:
-        if self.cache_control_image and (control_image_cache_path := self.get_control_image_cache_path(img_md)) is not None and os.path.exists(control_image_cache_path):
-            control_image = Image.open(control_image_cache_path)
-        if self.control_image_type and (control_image := get_controlnet_aux_condition(img_md['image_path'], control_type=self.control_image_type)) is not None:
+        if self.cache_control_image and (control_image_cache_path := self.get_control_image_cache_path(img_md)) is not None and os.path.exists(control_image_cache_path) and (control_image := Image.open(control_image_cache_path)) is not None and control_image.verify():
+            pass
+        elif self.control_image_type and (control_image := get_controlnet_aux_condition(self.get_image(img_md), control_type=self.control_image_type)) is not None:
             if self.control_image_cache_dir:
                 if not os.path.exists(control_image_cache_path):
                     control_image.save(control_image_cache_path)
@@ -80,7 +81,7 @@ class ControlNetDataset(T2IDataset):
             elif isinstance(control_image, np.ndarray):
                 control_image = Image.fromarray(control_image)
             else:
-                raise ValueError(f"control image must be a PIL Image or a numpy array, got {type(control_image)}, {control_image}")
+                raise ValueError(f"Control image must be a PIL Image or a numpy array, got {type(control_image)}, {control_image}")
             if self.control_image_cache_dir:
                 if not os.path.exists(control_image_cache_path):
                     control_image.save(control_image_cache_path)
@@ -93,14 +94,15 @@ class ControlNetDataset(T2IDataset):
                 elif (control_image_path := control_image.get('path')) is not None:
                     control_image = Image.open(control_image_path)
                 else:
-                    raise ValueError(f"control image not found for {img_md.get('image_key')}, control_image: {control_image}")
+                    raise ValueError(f"Control image not found for {img_md.get('image_key')}, control_image: {control_image}")
 
         elif (control_image_path := img_md.get('control_image_path')) is not None:
             control_image = Image.open(control_image_path)
         else:
-            self.logger.warning(f"control image not found for {img_md.get('image_key')}")
+            self.logger.warning(f"Control image not found for {img_md.get('image_key')}")
             return None
         assert isinstance(control_image, Image.Image), f"control image must be a PIL Image, got {type(control_image)}, {control_image}"
+        control_image.save(f"/root/autodl-tmp/open.png")
         return control_image
 
     def get_control_image(self, img_md, type: Literal['pil', 'tensor', 'numpy'] = 'tensor') -> torch.Tensor:
@@ -108,16 +110,20 @@ class ControlNetDataset(T2IDataset):
         if control_image is None:
             return None
         control_image = control_image.convert('RGB')
-        _, _, bucket_size = self.get_size(img_md, update=True)
+        image_size, _, bucket_size = self.get_size(img_md, update=True)
 
         crop_ltrb = self.get_crop_ltrb(img_md, update=True)
+        control_image = dataset_utils.resize_if_needed(control_image, image_size, resampling=self.control_image_resampling)
         control_image = dataset_utils.crop_ltrb_if_needed(control_image, crop_ltrb)
         control_image = dataset_utils.resize_if_needed(control_image, bucket_size, resampling=self.control_image_resampling)
         if type == 'tensor':
             control_image = CONTROL_IMAGE_TRANSFORMS(control_image)
         elif type == 'numpy':
             control_image = np.array(control_image)
-
+        elif type == 'pil':
+            pass
+        else:
+            raise ValueError(f"Invalid control image type: {type}, must be 'pil', 'tensor' or 'numpy'")
         return control_image
 
     def get_control_image_sample(self, batch: List[str], samples: Dict[str, Any]) -> Dict[str, Any]:
@@ -136,7 +142,7 @@ class ControlNetDataset(T2IDataset):
 
 
 def get_controlnet_aux_condition(
-    img_path: str,
+    image: Image.Image,
     control_type: Literal[
         "canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", "lineart_anime",
         "lineart_coarse", "lineart_realistic", "mediapipe_face", "mlsd", "normal_bae", "normal_midas",
@@ -159,7 +165,6 @@ def get_controlnet_aux_condition(
     if control_type not in CNAUX_PROCESSORS:
         CNAUX_PROCESSORS[control_type] = Processor(control_type, params=kwargs)
     processor = CNAUX_PROCESSORS[control_type]
-    image = Image.open(img_path)
     condition: Image.Image = processor(image, to_pil=True)
     if condition.width != image.width or condition.height != image.height:
         condition = condition.resize((image.width, image.height), resample=Image.Resampling.LANCZOS)
