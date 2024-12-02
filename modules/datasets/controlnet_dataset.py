@@ -174,6 +174,8 @@ def get_controlnet_aux_condition(
         target_height, target_width = image.shape[:2]
     else:
         raise ValueError(f"Invalid image type. Expected PIL Image, torch.Tensor or numpy array, got {type(image)}")
+    if isinstance(condition, np.ndarray):
+        condition = Image.fromarray(condition)
     if condition.width != target_width or condition.height != target_height:
         condition = condition.resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
     return condition
