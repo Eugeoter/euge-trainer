@@ -166,6 +166,10 @@ def get_controlnet_aux_condition(
         CNAUX_PROCESSORS[control_type] = Processor(control_type, params=kwargs)
     processor = CNAUX_PROCESSORS[control_type]
     condition: Image.Image = processor(image, to_pil=True)
+    if isinstance(condition, np.ndarray):
+        condition = Image.fromarray(condition)
+    else:
+        pass
     if condition.width != image.width or condition.height != image.height:
         condition = condition.resize((image.width, image.height), resample=Image.Resampling.LANCZOS)
     return condition

@@ -1,15 +1,12 @@
-import json
-import os
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torchviz
+import lpips
 from ml_collections import ConfigDict
 from typing import Dict, List, Union
 from safetensors.torch import load_file
 from waifuset import logging
 from .sd15_trainer import SD15Trainer
-from ..utils import lora_utils, sd15_train_utils, device_utils
+from ..utils import lora_utils, sd15_train_utils
 # from ..models.sd15.load_adapter import ConstantLoRAAdapter, MultiLoRAAdapter, HadamardMultiLoRAAdapter, HadamardMultiLoRAWrapper
 from ..models.sd15.hadamard_multi_lora_adapter import HadamardMultiLoRAWrapper
 from ..train_state.sd15_lora_adapter_train_state import SD15LoRAAdapterTrainState
@@ -42,6 +39,11 @@ class SD15LoraAdapterTrainer(SD15Trainer):
     init_module_ratio: float = None
     init_merge_ratios: List[float] = None
     init_lora_ratios: List[float] = None
+
+    lambda_lpips: float = 1e-1
+
+    def get_setups(self):
+        return super().get_setups() + [self.setup_lpips]
 
     def get_model_loaders(self):
         loaders = super().get_model_loaders()
@@ -286,6 +288,27 @@ class SD15LoraAdapterTrainer(SD15Trainer):
             v2=self.v2, clip_skip=self.clip_skip, max_token_length=self.max_token_length,
         )
         return encoder_hidden_states
+
+    def get_loss(self, model_pred, target, timesteps, batch):
+        mse_loss = super().get_loss(model_pred, target, timesteps, batch)
+        try:
+            if target.shape[1] < 3:
+                # We'll put zeros in the third channel...
+                n_to_add = 3-target.shape[1]
+                target_pad = torch.nn.functional.pad(target, (0, 0, 0, 0, 0, n_to_add), mode='constant', value=0)
+                model_pred_pad = torch.nn.functional.pad(model_pred, (0, 0, 0, 0, 0, n_to_add), mode='constant', value=0)
+                lpips_loss_batch = self.lpips_loss_fn(model_pred_pad, target_pad).mean()
+            elif target.shape[1] > 3:
+                lpips_loss_batch = self.lpips_loss_fn(model_pred[:, :3, :, :], target[:, :3, :, :]).mean()
+            else:
+                lpips_loss_batch = self.lpips_loss_fn(model_pred, target).mean()
+        except Exception as e:
+            self.logger.error(f"Error in calculating LPIPS loss: {e}. Model pred shape: {model_pred.shape}, target shape: {target.shape}")
+            lpips_loss_batch = torch.tensor(0.0, device=self.device, dtype=self.weight_dtype)
+        return mse_loss + self.lambda_lpips * lpips_loss_batch
+
+    def setup_lpips(self):
+        self.lpips_loss_fn = lpips.LPIPS(net="alex").to(self.accelerator.device)
 
     def train_step(self, batch) -> float:
         if batch.get("latents") is not None:
