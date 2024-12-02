@@ -166,10 +166,14 @@ def get_controlnet_aux_condition(
         CNAUX_PROCESSORS[control_type] = Processor(control_type, params=kwargs)
     processor = CNAUX_PROCESSORS[control_type]
     condition: Image.Image = processor(image, to_pil=True)
-    if isinstance(condition, np.ndarray):
-        condition = Image.fromarray(condition)
+    if isinstance(image, Image.Image):
+        target_width, target_height = image.size
+    elif isinstance(image, torch.Tensor):
+        target_height, target_width = image.shape[-2:]
+    elif isinstance(image, np.ndarray):
+        target_height, target_width = image.shape[:2]
     else:
-        pass
-    if condition.width != image.width or condition.height != image.height:
-        condition = condition.resize((image.width, image.height), resample=Image.Resampling.LANCZOS)
+        raise ValueError(f"Invalid image type. Expected PIL Image, torch.Tensor or numpy array, got {type(image)}")
+    if condition.width != target_width or condition.height != target_height:
+        condition = condition.resize((target_width, target_height), resample=Image.Resampling.LANCZOS)
     return condition
