@@ -10,6 +10,7 @@ from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipeline
 from modules.datasets.base_dataset import BaseDataset
+from waifuset import logging
 from .base_trainer import BaseTrainer
 from ..utils import advanced_train_utils, sd15_model_utils, sd15_train_utils, class_utils, train_utils
 from ..train_state.sd15_train_state import SD15TrainState
@@ -60,6 +61,7 @@ class SD15Trainer(BaseTrainer):
     masked_loss: bool = False
 
     zero_terminal_snr: bool = False
+    desired_terminal_snr: float = None
     ip_noise_gamma: float = None
     min_snr_gamma: float = None
     debiased_estimation_loss: bool = False
@@ -68,6 +70,17 @@ class SD15Trainer(BaseTrainer):
     max_timestep: int = 1000
     max_token_length: int = 225
 
+    use_edm2: bool = False
+    edm2_lr: float = 1e-2
+    edm2_optimizer_type: str = None
+    edm2_optimizer_kwargs: Dict[str, Any] = {}
+    edm2_lr_scheduler_type: str = 'auto'
+    edm2_lr_scheduler_kwargs: Dict[str, Any] = {}
+    edm2_lr_warmup_steps: int = 100
+    edm2_lr_constant_steps: int = 300
+    edm2_lr_scheduler_num_cycles: int = 1
+    edm2_lr_scheduler_power: float = 1.0
+
     timestep_sampler: Callable[[int, int, int], int] = None
     timestep_sampler_type: Literal['uniform', 'logit_normal', 'auto'] = 'uniform'
     timestep_sampler_kwargs: Dict[str, Any] = class_utils.cfg()
@@ -75,6 +88,7 @@ class SD15Trainer(BaseTrainer):
     do_classifier_free_guidance: bool = False
     caption_weighting: bool = False
     max_embeddings_multiples: int = 3
+    condition_dropout_rate: float = 0.01
 
     dataset_class = T2IDataset
     train_dataset: dataset_class
@@ -116,11 +130,11 @@ class SD15Trainer(BaseTrainer):
             setups = [
                 self._setup_dtype,
                 self._setup_model,
+                self._setup_diffusion,
                 self._setup_dataset,
                 self._setup_training,
                 self._setup_params,
                 self._setup_optims,
-                self._setup_diffusion,
                 self._setup_loss_recorder,
                 self._setup_train_state,
             ]
@@ -139,6 +153,25 @@ class SD15Trainer(BaseTrainer):
             self.logger.warning("zero_terminal_snr requires prediction_type='v_prediction'")
         if self.prediction_type == 'v_prediction' and self.noise_offset:
             self.logger.warning("noise_offset should not be used for v_prediction")
+
+        if self.use_edm2:
+            if self.prediction_type != 'v_prediction':
+                self.logger.warning(f"Adaptive loss weighting is designed only for v_prediction, but got prediction_type={self.prediction_type}")
+            if self.min_snr_gamma:
+                self.logger.warning("Adaptive loss weighting should not be used with min_snr_gamma")
+            if self.debiased_estimation_loss:
+                self.logger.warning("Adaptive loss weighting should not be used with debiased_estimation_loss")
+            if self.scale_v_pred_loss_like_noise_pred:
+                self.logger.warning("Adaptive loss weighting should not be used with scale_v_pred_loss_like_noise_pred")
+            if self.loss_weight_getter is not None:
+                self.logger.warning("Adaptive loss weighting should not be used with loss_weight_getter")
+            if self.timestep_sampler_type == "auto":
+                self.logger.warning("Adaptive loss weighting should not be used with timestep_sampler_type='auto'")
+            if self.use_deepspeed:
+                if self.edm2_optimizer_type is not None:
+                    raise ValueError("edm2_optimizer_type should be None when using deepspeed")
+                if self.edm2_lr_scheduler_type is not None:
+                    raise ValueError("edm2_lr_scheduler_type should be None when using deepspeed")
 
         if sum([self.use_xformers, self.sdpa, self.mem_eff_attn]) > 1:
             raise ValueError("Only one of use_xformers, sdpa, mem_eff_attn can be True")
@@ -249,6 +282,14 @@ class SD15Trainer(BaseTrainer):
             self.current_timesteps = [0]
             self.loss_map = {}
             self.run_number = 0
+
+    def get_edm2_mlp(self):
+        edm2_mlp = advanced_train_utils.AdaptiveLossWeightMLP(
+            self.noise_scheduler,
+            logvar_channels=128,
+            lambda_weights=None,
+        )
+        return edm2_mlp
 
     def _setup_dataset(self):
         super()._setup_dataset()
@@ -366,11 +407,74 @@ class SD15Trainer(BaseTrainer):
         )
         return training_models, params_to_optimize
 
+    def setup_edm2_mlp_params(self):
+        if not self.use_edm2:
+            return [], []
+        self.edm2_mlp.to(self.device, dtype=torch.float32)
+        self.edm2_mlp.requires_grad_(True)
+        self.edm2_mlp.train()
+        self.edm2_mlp = self._prepare_one_model(self.edm2_mlp, train=True, name='edm2_mlp', dtype=torch.float32, transform_model_if_ddp=True)
+        edm2_lr = self.edm2_lr or self.learning_rate
+        return [self.edm2_mlp], [{"params": self.edm2_mlp.parameters(), "lr": edm2_lr}] if self.edm2_optimizer_type is None else []
+
+    def _setup_optims(self):
+        super()._setup_optims()
+
+        if self.use_edm2:
+            if self.edm2_optimizer_type is None:
+                self.logger.info(f"Set optimizer of edm2 to {logging.yellow(self.optimizer_type)}")
+                self.edm2_optimizer = self.optimizer
+            else:
+                self.logger.info(f"Use optimizer for adaptive loss weighting: {logging.yellow(self.edm2_optimizer_type)}")
+                self.edm2_optimizer = train_utils.get_optimizer(
+                    optimizer_type=self.edm2_optimizer_type,
+                    trainable_params=self.edm2_mlp.parameters(),
+                    lr=self.edm2_lr,
+                    lr_scheduler_type=self.edm2_lr_scheduler_type,
+                    **self.edm2_optimizer_kwargs,
+                )
+                self.edm2_optimizer = self.accelerator.prepare(self.edm2_optimizer)
+
+            if self.edm2_lr_scheduler_type is not None:
+                self.logger.info(f"Set lr scheduler for adaptive loss weighting to {logging.yellow(self.edm2_lr_scheduler_type)}")
+                self.edm2_lr_scheduler = self.lr_scheduler
+            elif self.edm2_lr_scheduler_type == 'auto':
+                self.logger.info(f"Use auto lr scheduler for adaptive loss weighting")
+
+                def lr_lambda(current_step: int):
+                    warmup_steps = self.edm2_lr_warmup_steps
+                    constant_steps = self.edm2_lr_constant_steps
+                    if current_step <= warmup_steps:
+                        return current_step / max(1, warmup_steps)
+                    else:
+                        return 1 / math.sqrt(max(current_step / (warmup_steps + constant_steps), 1))
+
+                self.edm2_lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    optimizer=self.edm2_optimizer,
+                    lr_lambda=lr_lambda
+                )
+                self.edm2_lr_scheduler = self.accelerator.prepare(self.edm2_lr_scheduler)
+            else:
+                self.logger.info(f"Use constant lr scheduler for adaptive loss weighting: {logging.yellow(self.edm2_lr_scheduler_type)}")
+                self.edm2_lr_scheduler = train_utils.get_scheduler_fix(
+                    lr_scheduler_type=self.edm2_lr_scheduler_type,
+                    optimizer=self.edm2_optimizer,
+                    num_train_steps=self.num_train_steps,
+                    num_warmup_steps=self.edm2_lr_warmup_steps,
+                    num_cycles=self.edm2_lr_scheduler_num_cycles,
+                    power=self.edm2_lr_scheduler_power,
+                    ** self.edm2_lr_scheduler_kwargs,
+                )
+                self.edm2_lr_scheduler = self.accelerator.prepare(self.edm2_lr_scheduler)
+
     def _setup_diffusion(self):
         r"""
         Setup components related to diffusion models.
         """
         self.noise_scheduler = self.get_noise_scheduler()
+
+        if self.use_edm2:
+            self.edm2_mlp = self.get_edm2_mlp()
 
     def get_noise_scheduler(self):
         noise_scheduler = DDPMScheduler(
@@ -379,18 +483,13 @@ class SD15Trainer(BaseTrainer):
         )
         if self.prediction_type is not None:  # set prediction_type of scheduler if defined
             noise_scheduler.register_to_config(prediction_type=self.prediction_type)
-        if self.zero_terminal_snr:
-            advanced_train_utils.fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler)
+        if self.zero_terminal_snr or self.desired_terminal_snr is not None:
+            advanced_train_utils.apply_zero_terminal_snr(noise_scheduler, self.desired_terminal_snr)
         sd15_train_utils.prepare_scheduler_for_custom_training(noise_scheduler, self.device)  # prepare all_snr
 
         # Check ztsnr
         if self.zero_terminal_snr:
             assert noise_scheduler.all_snr[-1] != 0, f"Expected all_snr[-1] to be 0 when zero_terminal_snr is True, but got {noise_scheduler.all_snr[-1]}"
-
-        # self.logger.debug(f"alphas: {noise_scheduler.alphas}")
-        # self.logger.debug(f"betas: {noise_scheduler.betas}")
-        # self.logger.debug(f"alphas_cumprod: {noise_scheduler.alphas_cumprod}")
-        # self.logger.debug(f"all_snr: {noise_scheduler.all_snr}")
 
         return noise_scheduler
 
@@ -456,7 +555,8 @@ class SD15Trainer(BaseTrainer):
             self.scale_v_pred_loss_like_noise_pred or
             self.loss_weight_getter is not None or
             self.masked_loss or
-            self.timestep_sampler_type == "auto"
+            self.timestep_sampler_type == "auto" or
+            self.use_edm2
         ):
             loss = train_utils.conditional_loss(
                 model_pred.float(),
@@ -487,6 +587,11 @@ class SD15Trainer(BaseTrainer):
                 self.loss_for_timesteps = loss
                 loss = advanced_train_utils.apply_loss_adjustment(loss, timesteps, self.loss_map, self.train_state.global_step, self.num_train_steps)
 
+            if self.use_edm2:
+                loss, loss_scaled = self.edm2_mlp(loss, timesteps)
+                loss_scaled = loss_scaled.mean()
+                self.accelerator_logs.update({"edm2_loss/step":  loss_scaled.detach().item()})
+                self.pbar_logs.update({'edm2_loss': loss_scaled.detach().item()})
             loss = loss.mean()
         else:
             loss = train_utils.conditional_loss(
@@ -597,6 +702,19 @@ class SD15Trainer(BaseTrainer):
 
         return huber_c
 
+    def dropout_condition(self, conditions):
+        bs = conditions['crossattn'].shape[0]
+        device = conditions['crossattn'].device
+        dtype = conditions['crossattn'].dtype
+
+        p = 1.0 - self.condition_dropout_rate
+        batch_mask = torch.bernoulli(p * torch.ones(bs, device=device, dtype=dtype))
+
+        for cond_batch in conditions.values():
+            cond_batch.mul_(expand_dims_like(batch_mask, cond_batch))
+
+        return conditions
+
     def get_noisy_latents(self, latents, noise, timesteps):
         if self.ip_noise_gamma:
             noisy_latents = self.noise_scheduler.add_noise(latents, noise + self.ip_noise_gamma * torch.randn_like(latents), timesteps)
@@ -614,6 +732,21 @@ class SD15Trainer(BaseTrainer):
             )
         return encoder_hidden_states
 
+    def optimizer_step(self, loss):
+        super().optimizer_step(loss)
+        if self.use_edm2 and self.edm2_optimizer is not self.optimizer:
+            self.edm2_optimizer.step()
+
+    def lr_scheduler_step(self):
+        super().lr_scheduler_step()
+        if self.use_edm2 and self.edm2_lr_scheduler is not self.lr_scheduler:
+            self.edm2_lr_scheduler.step()
+
+    def zero_grad(self):
+        super().zero_grad()
+        if self.use_edm2 and self.edm2_optimizer is not self.optimizer:
+            self.edm2_optimizer.zero_grad()
+
     def train_step(self, batch) -> float:
         if batch.get("latents") is not None:
             latents = batch["latents"].to(self.device)
@@ -623,6 +756,8 @@ class SD15Trainer(BaseTrainer):
         latents *= self.vae_scale_factor
 
         encoder_hidden_states = self.encode_caption(batch['captions'])
+        if self.condition_dropout_rate:
+            encoder_hidden_states = self.dropout_condition(encoder_hidden_states)
 
         noise = self.get_noise(latents)
         timesteps = self.get_timesteps(latents)
@@ -640,3 +775,9 @@ class SD15Trainer(BaseTrainer):
 
         loss = self.get_loss(model_pred, target, timesteps, batch)
         return loss
+
+
+def expand_dims_like(x, y):
+    while x.dim() != y.dim():
+        x = x.unsqueeze(-1)
+    return x

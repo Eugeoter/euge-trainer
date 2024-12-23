@@ -24,7 +24,7 @@ class SDXLTrainState(SD15TrainState):
         self.logger.print(f"diffusion model saved to: `{logging.yellow(save_path)}`")
         return save_path
 
-    def get_pipeline(self):
+    def get_pipeline_psi(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=[self.unwrap_model(self.text_encoder1), self.unwrap_model(self.text_encoder2)],

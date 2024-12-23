@@ -47,11 +47,11 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
         self.buckets = self.make_buckets(self.dataset)
 
         if not self.arb:
-            self.logger.print(f"resolution: {self.get_resolution()}")
+            self.logger.print(f"Resolution: {self.get_resolution()}")
         else:
             bucket_keys = list(sorted(self.buckets.keys(), key=lambda x: x[0] * x[1]))
-            self.logger.print(f"buckets: {bucket_keys[0]} ~ {bucket_keys[-1]}")
-            self.logger.print(f"number of buckets: {len(self.buckets)}")
+            self.logger.print(f"Buckets: {bucket_keys[0]} ~ {bucket_keys[-1]}")
+            self.logger.print(f"Number of buckets: {len(self.buckets)}")
 
     def get_samplers(self):
         samplers = super().get_samplers()
@@ -163,8 +163,12 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
 
     def get_size(self, img_md, update=False):
         image_size, original_size, bucket_size = None, None, None
-        if (image_size := img_md.get('image_size')) is None:
-            if os.path.exists(img_path := img_md.get('image_path', '')):
+        if (image_size := img_md.get('image_size')) is not None:
+            pass
+        elif (image_width := img_md.get('width')) is not None and (image_height := img_md.get('height')) is not None:
+            image_size = (image_width, image_height)
+        else:
+            if (img_path := img_md.get('image_path')) is not None and os.path.exists(img_path):
                 image_size = dataset_utils.get_image_size(img_path)
             elif (image := self.open_image(img_md)) is not None:
                 image_size = image.size

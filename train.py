@@ -26,9 +26,9 @@ def main(argv):
     elif trainer == 'sd15_controlnext':
         from modules.trainers.sd15_controlnext_trainer import SD15ControlNeXtTrainer
         trainer_class = SD15ControlNeXtTrainer
-    elif trainer == 'sd15_lora_adapter':
-        from modules.trainers.sd15_lora_adapter_trainer import SD15LoraAdapterTrainer
-        trainer_class = SD15LoraAdapterTrainer
+    elif trainer == 'sd15_lora_adaptation':
+        from modules.trainers.sd15_lora_adaptation_trainer import SD15LoRAAdaptationTrainer
+        trainer_class = SD15LoRAAdaptationTrainer
     elif trainer == 'sdxl_controlnet':
         from modules.trainers.sdxl_controlnet_trainer import SDXLControlNetTrainer
         trainer_class = SDXLControlNetTrainer

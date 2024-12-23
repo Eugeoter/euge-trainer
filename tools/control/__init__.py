@@ -1,11 +1,20 @@
 import cv2
 import numpy as np
-import torch
 from PIL import Image
 from typing import Literal
 from .utils import *
 
 CNAUX_PROCESSORS = {}
+CNAUX_CONTROL_TYPES = [
+    "canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", "lineart_anime",
+    "lineart_coarse", "lineart_realistic", "mediapipe_face", "mlsd", "normal_bae", "normal_midas",
+    "openpose", "openpose_face", "openpose_faceonly", "openpose_full", "openpose_hand",
+    "scribble_hed", "scribble_pidinet", "shuffle", "softedge_hed", "softedge_hedsafe",
+    "softedge_pidinet", "softedge_pidsafe", "dwpose"
+]
+ADDITIONAL_CONTROL_TYPES = [
+    "random_canny", "animalpose", "densepose", "teed", "mteed", "tile", "mobile_sam", "random_blur"
+]
 
 
 def get_controlnet_aux_condition(
@@ -15,7 +24,8 @@ def get_controlnet_aux_condition(
         "lineart_coarse", "lineart_realistic", "mediapipe_face", "mlsd", "normal_bae", "normal_midas",
         "openpose", "openpose_face", "openpose_faceonly", "openpose_full", "openpose_hand",
         "scribble_hed", "scribble_pidinet", "shuffle", "softedge_hed", "softedge_hedsafe",
-        "softedge_pidinet", "softedge_pidsafe", "dwpose"
+        "softedge_pidinet", "softedge_pidsafe", "dwpose",
+        "random_canny", "animalpose", "densepose", "teed", "mteed", "tile", "mobile_sam", "random_blur"
     ],
     **kwargs
 ) -> np.ndarray:
@@ -23,19 +33,39 @@ def get_controlnet_aux_condition(
     Get the condition of an image using controlnet_aux library.
     """
     from controlnet_aux.processor import Processor
-    # options are:
+    # Options are:
     # ["canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", "lineart_anime",
     #  "lineart_coarse", "lineart_realistic", "mediapipe_face", "mlsd", "normal_bae", "normal_midas",
     #  "openpose", "openpose_face", "openpose_faceonly", "openpose_full", "openpose_hand",
     #  "scribble_hed, "scribble_pidinet", "shuffle", "softedge_hed", "softedge_hedsafe",
     #  "softedge_pidinet", "softedge_pidsafe", "dwpose"]
-    if control_type not in CNAUX_PROCESSORS:
-        CNAUX_PROCESSORS[control_type] = Processor(control_type, params=kwargs)
-    processor = CNAUX_PROCESSORS[control_type]
-    img_path = img_md['image_path']
-    image = Image.open(img_path)
-    condition = processor(image, to_pil=True)
-    return np.array(condition)
+    if control_type in ADDITIONAL_CONTROL_TYPES:
+        if control_type == "random_canny":
+            return get_random_canny_condition(img_md)
+        elif control_type == "animalpose":
+            return get_animalpose_condition(img_md)
+        elif control_type == "densepose":
+            return get_densepose_condition(img_md)
+        elif control_type == "teed":
+            return get_teed_condition(img_md)
+        elif control_type == "mteed":
+            return get_mteed_condition(img_md)
+        elif control_type == "tile":
+            return get_tile_condition(img_md, **kwargs)
+        elif control_type == "mobile_sam":
+            return get_mobile_sam_condition(img_md, **kwargs)
+        elif control_type == 'random_blur':
+            return get_random_blur_condition(img_md, **kwargs)
+    elif control_type in CNAUX_CONTROL_TYPES:
+        if control_type not in CNAUX_PROCESSORS:
+            CNAUX_PROCESSORS[control_type] = Processor(control_type, params=kwargs)
+        processor = CNAUX_PROCESSORS[control_type]
+        img_path = img_md['image_path']
+        image = Image.open(img_path)
+        condition = processor(image, to_pil=True)
+        return np.array(condition)
+    else:
+        raise ValueError(f"Invalid control type: {control_type}. Expected one of {', '.join(CNAUX_CONTROL_TYPES + ADDITIONAL_CONTROL_TYPES)}")
 
 
 def get_mlsd_condition(img_md, thr_v=0.5, thr_d=0.5) -> np.ndarray:
@@ -46,7 +76,7 @@ def get_mlsd_condition(img_md, thr_v=0.5, thr_d=0.5) -> np.ndarray:
     return mlsd_condition
 
 
-def get_canny_condition(img_md, low_threshold=None, high_threshold=None) -> np.ndarray:
+def get_random_canny_condition(img_md, low_threshold=None, high_threshold=None) -> np.ndarray:
     from .canny import get_canny
     if (img_path := img_md.get('image_path')) is not None:
         image = cv2.imread(img_path)
@@ -175,3 +205,19 @@ def get_mobile_sam_condition(img_md, detect_resolution=512, image_resolution=512
     image = cv2.imread(img_path)
     sam_condition = get_mobile_sam(image, detect_resolution=detect_resolution, image_resolution=image_resolution)
     return sam_condition
+
+
+def get_tile_condition(img_md, k=None, interpolation_downscale=None, interpolation_upscale=None) -> np.ndarray:
+    from .tile import get_tile
+    img_path = img_md['image_path']
+    image = Image.open(img_path)
+    tile_condition = get_tile(image, k, interpolation_downscale, interpolation_upscale)
+    return np.array(tile_condition)
+
+
+def get_random_blur_condition(img_md, radius=None) -> np.ndarray:
+    from .blur import get_blur
+    img_path = img_md['image_path']
+    image = Image.open(img_path)
+    blur_condition = get_blur(image, radius)
+    return np.array(blur_condition)

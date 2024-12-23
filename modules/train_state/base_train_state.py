@@ -89,6 +89,8 @@ class BaseTrainState(class_utils.SubModuleMixin):
         self.save_ema_model_history = []
         self.save_train_state_history = []
 
+        self.logger.info(f"Event triggers: {', '.join([logging.yellow(trigger.__name__) for trigger in self.get_event_triggers()])}")
+
     def check_config(self):
         if self.save_max_n_models is not None and self.save_max_n_models < 1:
             raise ValueError(f"save_max_n_models must be greater than 0, got {self.save_max_n_models}")
@@ -245,3 +247,10 @@ class BaseTrainState(class_utils.SubModuleMixin):
 
     def do_eval(self, on_step_end=False, on_epoch_end=False, on_train_end=False, on_train_start=False):
         pass
+
+    def get_event_triggers(self):
+        return [getattr(self, func) for func in dir(self) if func.startswith("trigger_") and func.endswith("_event") and callable(getattr(self, func))]
+
+    def trigger_events(self):
+        for trigger in self.get_event_triggers():
+            trigger()

@@ -1,3 +1,7 @@
+import math
+import transformers
+import matplotlib.pyplot as plt
+from diffusers import DDPMScheduler
 import torch
 import random
 import numpy as np
@@ -26,35 +30,77 @@ def prepare_scheduler_for_custom_training(noise_scheduler, device):
     noise_scheduler.all_snr = all_snr.to(device)
 
 
-def fix_noise_scheduler_betas_for_zero_terminal_snr(noise_scheduler):
+def enforce_zero_terminal_snr(betas):
+    # Convert betas to alphas_bar_sqrt
+    alphas = 1 - betas
+    alphas_bar = alphas.cumprod(0)
+    alphas_bar_sqrt = alphas_bar.sqrt()
+
+    # Store old values.
+    alphas_bar_sqrt_0 = alphas_bar_sqrt[0].clone()
+    alphas_bar_sqrt_T = alphas_bar_sqrt[-1].clone()
+    # Shift so last timestep is zero.
+    alphas_bar_sqrt -= alphas_bar_sqrt_T
+    # Scale so first timestep is back to old value.
+    alphas_bar_sqrt *= alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
+
+    # Convert alphas_bar_sqrt to betas
+    alphas_bar = alphas_bar_sqrt**2
+    alphas = alphas_bar[1:] / alphas_bar[:-1]
+    alphas = torch.cat([alphas_bar[0:1], alphas])
+    betas = 1 - alphas
+    return betas
+
+
+def fix_noise_scheduler_betas_for_desired_terminal_snr(betas, desired_terminal_snr):
+    """Use pruned-betas to enforce a desired terminal SNR."""
+    assert desired_terminal_snr < 0.01, "desired_terminal_snr must be less than 0.01(approx) which is original target SNR, are you sure?"
+    # if given input is not torch.tensor, convert it to torch.tensor
+    if not isinstance(desired_terminal_snr, torch.Tensor):
+        desired_terminal_snr = torch.tensor(desired_terminal_snr)  # convert to tensor
+    # Convert betas to alphas_bar_sqrt
+    alphas = 1 - betas
+    alphas_bar = alphas.cumprod(0)
+    alphas_bar_sqrt = alphas_bar.sqrt()
+
+    # Store old values
+    alphas_bar_sqrt_0 = alphas_bar_sqrt[0].clone()
+    alphas_bar_sqrt_T = alphas_bar_sqrt[-1].clone()
+
+    # Compute desired alphas_bar_T based on desired_terminal_snr
+    desired_alphas_bar_T = desired_terminal_snr / (1 + desired_terminal_snr)
+    desired_alphas_bar_sqrt_T = desired_alphas_bar_T.sqrt()
+
+    # Shift so last timestep is desired_alphas_bar_sqrt_T
+    shift = alphas_bar_sqrt_T - desired_alphas_bar_sqrt_T
+    alphas_bar_sqrt -= shift
+
+    # Scale so first timestep is back to old value
+    scale = alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - shift)
+    alphas_bar_sqrt *= scale
+
+    # Convert alphas_bar_sqrt to betas
+    alphas_bar = alphas_bar_sqrt**2
+    alphas = alphas_bar[1:] / alphas_bar[:-1]
+    alphas = torch.cat([alphas_bar[0:1], alphas])
+    betas = 1 - alphas
+    return betas
+
+
+def apply_zero_terminal_snr(noise_scheduler, desired_terminal_snr=None):
     # fix beta: zero terminal SNR
-    logger.print(f"fix noise scheduler betas: https://arxiv.org/abs/2305.08891")
-
-    def enforce_zero_terminal_snr(betas):
-        # Convert betas to alphas_bar_sqrt
-        alphas = 1 - betas
-        alphas_bar = alphas.cumprod(0)
-        alphas_bar_sqrt = alphas_bar.sqrt()
-
-        # Store old values.
-        alphas_bar_sqrt_0 = alphas_bar_sqrt[0].clone()
-        alphas_bar_sqrt_T = alphas_bar_sqrt[-1].clone()
-        # Shift so last timestep is zero.
-        alphas_bar_sqrt -= alphas_bar_sqrt_T
-        # Scale so first timestep is back to old value.
-        alphas_bar_sqrt *= alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
-
-        # Convert alphas_bar_sqrt to betas
-        alphas_bar = alphas_bar_sqrt**2
-        alphas = alphas_bar[1:] / alphas_bar[:-1]
-        alphas = torch.cat([alphas_bar[0:1], alphas])
-        betas = 1 - alphas
-        return betas
+    # print(f"fix noise scheduler betas: https://arxiv.org/abs/2305.08891")
 
     betas = noise_scheduler.betas
-    betas = enforce_zero_terminal_snr(betas)
+    if desired_terminal_snr is None:
+        betas = enforce_zero_terminal_snr(betas)
+    else:
+        betas = fix_noise_scheduler_betas_for_desired_terminal_snr(betas, desired_terminal_snr)
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+    # print("original:", noise_scheduler.betas)
+    # print("fixed:", betas)
 
     noise_scheduler.betas = betas
     noise_scheduler.alphas = alphas
@@ -749,3 +795,159 @@ def adaptive_clustered_mse_loss(input, target, timesteps, loss_map, reduction="n
         return adjusted_loss
     else:
         raise ValueError(f"Invalid reduction type: {reduction}")
+
+
+# Adaptive Loss Weighting
+
+
+@torch.no_grad()
+def plot_dynamic_loss_weighting(save_path, model, num_timesteps=1000):
+    """
+    Plot the dynamic loss weighting across timesteps using the learned parameters of the AdaptiveLossWeightMLP.
+
+    :param model: The AdaptiveLossWeightMLP instance.
+    :param num_timesteps: Total number of timesteps to plot.
+    """
+
+    # Generate a range of timesteps
+    timesteps = torch.linspace(0, num_timesteps - 1, num_timesteps).long()
+
+    loss_scale = torch.ones_like(timesteps) / torch.exp(model._forward(timesteps).detach().cpu())
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(timesteps.cpu().numpy(), loss_scale.cpu().numpy(),
+             label=f'Learned Loss Weight')
+    plt.xlabel('Timesteps')
+    plt.ylabel('Weight')
+    plt.title('Learned Loss Weighting vs Timesteps')
+    plt.legend()
+    plt.grid(True)
+    plt.ylim(bottom=0)
+    # plt.show()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path)
+    # clean
+    plt.clf()
+    plt.close()
+
+
+def normalize(x: torch.Tensor, dim=None, eps=1e-4) -> torch.Tensor:
+    if dim is None:
+        dim = list(range(1, x.ndim))
+    norm = torch.linalg.vector_norm(x, dim=dim, keepdim=True, dtype=torch.float32)  # type: torch.Tensor
+    norm = torch.add(eps, norm, alpha=np.sqrt(norm.numel() / x.numel()))
+    return x / norm.to(x.dtype)
+
+
+class FourierFeatureExtractor(torch.nn.Module):
+    def __init__(self, num_channels, bandwidth=1):
+        super().__init__()
+        self.register_buffer('freqs', 2 * np.pi * torch.randn(num_channels) * bandwidth)
+        self.register_buffer('phases', 2 * np.pi * torch.rand(num_channels))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = x.to(torch.float32)
+        y = y.ger(self.freqs.to(torch.float32))
+        y = y + self.phases.to(torch.float32)  # type: torch.Tensor
+        y = y.cos() * np.sqrt(2)
+        return y.to(x.dtype)
+
+
+class NormalizedLinearLayer(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel):
+        super().__init__()
+        self.out_channels = out_channels
+        self.weight = torch.nn.Parameter(torch.randn(out_channels, in_channels, *kernel))
+
+    def forward(self, x: torch.Tensor, gain=1) -> torch.Tensor:
+        w = self.weight.to(torch.float32)
+        if self.training:
+            with torch.no_grad():
+                self.weight.copy_(normalize(w))  # forced weight normalization
+        w = normalize(w)  # traditional weight normalization
+        w = w * (gain / np.sqrt(w[0].numel()))  # type: torch.Tensor # magnitude-preserving scaling
+        w = w.to(x.dtype)
+        if w.ndim == 2:
+            return x @ w.t()
+        assert w.ndim == 4
+        return torch.nn.functional.conv2d(x, w, padding=(w.shape[-1]//2,))
+
+
+class AdaptiveLossWeightMLP(torch.nn.Module):
+    def __init__(
+        self,
+        noise_scheduler: DDPMScheduler,
+        logvar_channels=128,
+        lambda_weights: torch.Tensor = None,
+    ):
+        super().__init__()
+        self.alphas_cumprod = noise_scheduler.alphas_cumprod.cuda()
+        # self.a_bar_mean = noise_scheduler.alphas_cumprod.mean()
+        # self.a_bar_std = noise_scheduler.alphas_cumprod.std()
+        self.a_bar_mean = self.alphas_cumprod.mean()
+        self.a_bar_std = self.alphas_cumprod.std()
+        self.logvar_fourier = FourierFeatureExtractor(logvar_channels)
+        self.logvar_linear = NormalizedLinearLayer(logvar_channels, 1, kernel=[])  # kernel = []? (not in code given, added matching edm2)
+        self.lambda_weights = lambda_weights.cuda() if lambda_weights is not None else torch.ones(1000, device='cuda')
+        self.noise_scheduler = noise_scheduler
+
+    def _forward(self, timesteps: torch.Tensor):
+        # a_bar = self.noise_scheduler.alphas_cumprod[timesteps]
+        a_bar = self.alphas_cumprod[timesteps]
+        c_noise = a_bar.sub(self.a_bar_mean).div_(self.a_bar_std)
+        return self.logvar_linear(self.logvar_fourier(c_noise)).squeeze()
+
+    def forward(self, loss: torch.Tensor, timesteps):
+        adaptive_loss_weights = self._forward(timesteps)
+        loss_scaled = loss * (self.lambda_weights[timesteps] / torch.exp(adaptive_loss_weights))  # type: torch.Tensor
+        loss = loss_scaled + adaptive_loss_weights  # type: torch.Tensor
+
+        return loss, loss_scaled
+
+
+def create_weight_MLP(noise_scheduler, logvar_channels=128, lambda_weights=None):
+    lossweightMLP = AdaptiveLossWeightMLP(noise_scheduler, logvar_channels, lambda_weights)
+    MLP_optim = transformers.optimization.Adafactor(
+        lossweightMLP.parameters(),
+        lr=1.5e-2,
+        scale_parameter=False,
+        relative_step=False,
+        warmup_init=False
+    )
+#    MLP_optim = torch.optim.AdamW(lossweightMLP.parameters(), lr=1.5e-2, weight_decay=0)
+#    MLP_optim = lion_pytorch.Lion(lossweightMLP.parameters(), lr=2e-2)
+#    MLP_optim = ADOPT(lossweightMLP.parameters(), lr=1.5e-2)
+
+
+#     def lr_lambda(current_step: int):
+#         warmup_steps = 100
+#         constant_steps = 300
+#         if current_step <= warmup_steps:
+#             return current_step / max(1, warmup_steps)
+#         else:
+#             return 1/math.sqrt(max(current_step/(warmup_steps+constant_steps), 1))
+#
+#     MLP_scheduler = torch.optim.lr_scheduler.LambdaLR(
+#         optimizer=MLP_optim,
+#         lr_lambda=lr_lambda
+#     )
+    disable_scheduler = False  # スケジューラーを無効化
+
+    if disable_scheduler:
+        def lr_lambda(current_step: int):
+            return 1  # const
+    else:
+        def lr_lambda(current_step: int):
+            warmup_steps = 100
+            constant_steps = 300
+            if current_step <= warmup_steps:
+                return current_step / max(1, warmup_steps)
+            else:
+                return 1 / math.sqrt(max(current_step / (warmup_steps + constant_steps), 1))
+
+    MLP_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer=MLP_optim,
+        lr_lambda=lr_lambda
+    )
+
+    return lossweightMLP, MLP_optim, MLP_scheduler

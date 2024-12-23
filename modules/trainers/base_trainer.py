@@ -72,6 +72,8 @@ class BaseTrainer(class_utils.FromConfigMixin):
     max_retries: int = None  # = infinite retries
 
     learning_rate: float
+    lr_scheduler_type: str = 'constant_with_warmup'
+    lr_scheduler_kwargs: Dict[str, Any] = {}
     lr_warmup_steps: int = 0
     lr_scheduler_power: float = 1.0
     lr_scheduler_num_cycles: int = 1
@@ -106,6 +108,9 @@ class BaseTrainer(class_utils.FromConfigMixin):
 
     optimizer_type: str
     optimizer_kwargs: dict = {}
+
+    lr_scheduler_type: str
+    lr_scheduler_kwargs: dict = {}
 
     cpu: bool = False
 
@@ -393,8 +398,22 @@ class BaseTrainer(class_utils.FromConfigMixin):
         """
         # self.logger.debug(f"Number of trainable parameters: {logging.yellow(sum([p['params'].numel() for p in self.params_to_optimize]))}")
 
-        optimizer = train_utils.get_optimizer(self, self.params_to_optimize)
-        lr_scheduler = train_utils.get_scheduler_fix(self, optimizer, self.num_train_steps)
+        optimizer = train_utils.get_optimizer(
+            optimizer_type=self.optimizer_type,
+            trainable_params=self.params_to_optimize,
+            lr=self.learning_rate,
+            lr_scheduler_type=self.lr_scheduler_type,
+            **self.optimizer_kwargs
+        )
+        lr_scheduler = train_utils.get_scheduler_fix(
+            lr_scheduler_type=self.lr_scheduler_type,
+            optimizer=optimizer,
+            num_train_steps=self.num_train_steps,
+            num_warmup_steps=self.lr_warmup_steps,
+            num_cycles=self.lr_scheduler_num_cycles,
+            power=self.lr_scheduler_power,
+            **self.lr_scheduler_kwargs
+        )
 
         self.logger.info(f"Optimizer number of parameters: {logging.yellow(sum(p.numel() for p in optimizer.param_groups[0]['params']))}")
 
@@ -659,7 +678,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
     def save_config(self, fp):
         config = {k: str(self.__getattribute__(k)) for k in self.get_config().keys()}
         with open(fp, 'w') as f:
-            json.dump(config, f)
+            json.dump(config, f, indent=4)
         return fp
 
     def save_note(self, fp):
@@ -787,6 +806,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
             self.train_state.save()  # on train start
         if self.train_state.eval_on_train_start:
             self.train_state.eval()  # on train start
+        self.train_state.trigger_events()
 
         try:
             self.train_loop()
@@ -812,9 +832,41 @@ class BaseTrainer(class_utils.FromConfigMixin):
         if eval_on_train_end:
             self.logger.info(f"Evaluating on train end...")
             self.train_state.eval(on_train_end=True)
+        self.train_state.trigger_events()
         self.accelerator.end_training()
         self.logger.info(logging.green(f"Training finished at process {self.accelerator.local_process_index+1}/{self.accelerator.num_processes}"), disable=False)
         del self.accelerator
+
+    def clip_grad_norm(self):
+        if self.max_grad_norm:
+            params_to_clip = []
+            for m in self.training_models:
+                params_to_clip.extend(m.parameters())
+            self.accelerator.clip_grad_norm_(params_to_clip, self.max_grad_norm)
+
+    def optimizer_step(self, loss):
+        # Stochastic rounding
+        if 'stochastic' in self.optimizer_type.lower():
+            for model in self.training_models:
+                if model.dtype == torch.bfloat16:
+                    from torchastic import StochasticAccumulator
+                    StochasticAccumulator.reassign_grad_buffer(model)
+
+        self.optimizer.step()
+
+    def lr_scheduler_step(self):
+        self.lr_scheduler.step()
+
+    def zero_grad(self):
+        self.optimizer.zero_grad(set_to_none=True)
+
+    def backward(self, loss):
+        if self.use_deepspeed:
+            self.ds_model.backward(loss)
+            last_batch_iteration = (self.train_state.global_step + 1) // (self.total_batch_size // (self.batch_size * self.accelerator.num_processes))
+            self.ds_model.step(lr_kwargs={'last_batch_iteration': last_batch_iteration})
+        else:
+            self.accelerator.backward(loss)
 
     def train_loop(self):
         while self.train_state.epoch < self.num_train_epochs:
@@ -828,12 +880,8 @@ class BaseTrainer(class_utils.FromConfigMixin):
                     loss = self.train_step(batch)
                     # if self.loss_weight_getter is not None:
                     #     loss = loss * self.get_loss_weight(batch, loss)
-                    if self.use_deepspeed:
-                        self.ds_model.backward(loss)
-                        last_batch_iteration = (self.train_state.global_step + 1) // (self.total_batch_size // (self.batch_size * self.accelerator.num_processes))
-                        self.ds_model.step(lr_kwargs={'last_batch_iteration': last_batch_iteration})
-                    else:
-                        self.accelerator.backward(loss)
+
+                    self.backward(loss)
 
                     # verify gradient flow
                     # for m in self.training_models:
@@ -841,21 +889,10 @@ class BaseTrainer(class_utils.FromConfigMixin):
                     #         if param.grad is None:
                     #             self.logger.info(f"grad of {logging.blue(name)}: {logging.green(param.grad.abs().mean().item()) if param.grad is not None else logging.red(None)}")
 
-                    if self.accelerator.sync_gradients and self.max_grad_norm:
-                        params_to_clip = []
-                        for m in self.training_models:
-                            params_to_clip.extend(m.parameters())
-                        self.accelerator.clip_grad_norm_(params_to_clip, self.max_grad_norm)
-
-                    if 'stochastic' in self.optimizer_type.lower():
-                        for model in self.training_models:
-                            if model.dtype == torch.bfloat16:
-                                from torchastic import StochasticAccumulator
-                                StochasticAccumulator.reassign_grad_buffer(model)
-
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
+                    self.clip_grad_norm()
+                    self.optimizer_step(loss)
+                    self.lr_scheduler_step()
+                    self.zero_grad()
 
                     if self.use_ema:
                         self.ema_step()
@@ -865,6 +902,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
                     self.train_state.step()
                     self.train_state.save(on_step_end=True)
                     self.train_state.eval(on_step_end=True)
+                    self.train_state.trigger_events()
 
                 # loggings
                 step_loss: float = loss.detach().item()
@@ -896,6 +934,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
                 self.wandb_run.log(self.accelerator_logs, step=self.train_state.epoch)
             self.train_state.save(on_epoch_end=True)
             self.train_state.eval(on_epoch_end=True)
+            self.train_state.trigger_events()
             if self.gc_every_n_epochs and self.train_state.epoch % self.gc_every_n_epochs == 0:
                 gc.collect()
             if self.train_state.global_step >= self.num_train_steps:

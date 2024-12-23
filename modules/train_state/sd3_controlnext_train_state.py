@@ -6,7 +6,7 @@ class SD3ControlNeXtTrainState(SD3TrainState, ControlNeXtTrainState):
     def save_diffusion_model(self):
         return ControlNeXtTrainState.save_diffusion_model(self)
 
-    def get_pipeline(self):
+    def get_pipeline_psi(self):
         return self.pipeline_class(
             transformer=self.unwrap_model(self.nnet),
             controlnext=self.unwrap_model(self.controlnext),

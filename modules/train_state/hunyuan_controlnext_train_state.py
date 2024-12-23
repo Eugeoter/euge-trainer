@@ -8,7 +8,7 @@ class HunyuanControlNeXtTrainState(HunyuanTrainState, ControlNeXtTrainState):
     def save_diffusion_model(self):
         return ControlNeXtTrainState.save_diffusion_model(self)
 
-    def get_pipeline(self):
+    def get_pipeline_psi(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=self.unwrap_model(self.text_encoder[0]),

@@ -13,6 +13,7 @@ einops
 bitsandbytes==0.39.1
 tensorboard
 absl-py
+imagesize
 ml-collections
 datasets==2.21.0
 huggingface-hub

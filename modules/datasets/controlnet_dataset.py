@@ -102,7 +102,6 @@ class ControlNetDataset(T2IDataset):
             self.logger.warning(f"Control image not found for {img_md.get('image_key')}")
             return None
         assert isinstance(control_image, Image.Image), f"control image must be a PIL Image, got {type(control_image)}, {control_image}"
-        control_image.save(f"/root/autodl-tmp/open.png")
         return control_image
 
     def get_control_image(self, img_md, type: Literal['pil', 'tensor', 'numpy'] = 'tensor') -> torch.Tensor:

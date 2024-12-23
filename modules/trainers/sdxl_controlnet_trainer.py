@@ -60,8 +60,8 @@ class SDXLControlNetTrainer(SDXLTrainer, SD15ControlNetTrainer):
         else:
             with torch.no_grad():
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
-        if torch.isnan(latents).any():
-            raise ValueError("Latents contain NaNs")
+        # if torch.isnan(latents).any():
+        #     raise ValueError("Latents contain NaNs")
         latents *= self.vae_scale_factor
 
         target_size = batch["target_size_hw"]

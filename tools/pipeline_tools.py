@@ -48,7 +48,7 @@ def get_scheduler(
     scheduler_name,
     scheduler_config,
 ):
-    if scheduler_name == 'Euler A':
+    if scheduler_name == 'Euler a':
         from diffusers.schedulers import EulerAncestralDiscreteScheduler
         scheduler = EulerAncestralDiscreteScheduler.from_config(scheduler_config)
     elif scheduler_name == 'UniPC':
@@ -340,6 +340,67 @@ def get_StableDiffusionAdapterPipeline(
     pipeline.scheduler = get_scheduler(scheduler_name, pipeline.scheduler.config)
     pipeline.set_progress_bar_config()
     pipeline = pipeline.to(device, dtype=torch.float16)
+
+    if enable_xformers_memory_efficient_attention:
+        pipeline.enable_xformers_memory_efficient_attention()
+
+    gc.collect()
+    if str(device) == 'cuda' and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return pipeline
+
+
+def get_StableDiffusionXLPipeline(
+    pretrained_model_name_or_path,
+    scheduler_name='UniPC',
+    enable_xformers_memory_efficient_attention=False,
+    revision=None,
+    variant=None,
+    hf_cache_dir=None,
+    device=None,
+    no_half_vae=False,
+    prediction_type=None,
+    rescale_betas_zero_snr=None,
+):
+    from diffusers import StableDiffusionXLPipeline, UNet2DConditionModel
+
+    pipeline_init_kwargs = {}
+
+    print(f"loading pipeline from {pretrained_model_name_or_path}")
+    if os.path.isfile(pretrained_model_name_or_path):
+        pipeline: StableDiffusionXLPipeline = StableDiffusionXLPipeline.from_single_file(
+            pretrained_model_name_or_path,
+            use_safetensors=pretrained_model_name_or_path.endswith(".safetensors"),
+            revision=revision,
+            variant=variant,
+            local_files_only=True,
+            cache_dir=hf_cache_dir,
+            safety_checker=None,
+            **pipeline_init_kwargs,
+        )
+    else:
+        pipeline: StableDiffusionXLPipeline = StableDiffusionXLPipeline.from_pretrained(
+            pretrained_model_name_or_path,
+            revision=revision,
+            variant=variant,
+            cache_dir=hf_cache_dir,
+            safety_checker=None,
+            **pipeline_init_kwargs,
+        )
+
+    scheduler_config = pipeline.scheduler.config
+    if prediction_type:
+        scheduler_config['prediction_type'] = prediction_type
+    if rescale_betas_zero_snr is not None:
+        scheduler_config['rescale_betas_zero_snr'] = rescale_betas_zero_snr
+    pipeline.scheduler = get_scheduler(scheduler_name, pipeline.scheduler.config)
+    pipeline.set_progress_bar_config()
+    pipeline = pipeline.to(device, dtype=torch.float16)
+
+    if no_half_vae:
+        print("No half vae")
+        pipeline.vae = pipeline.vae.to(torch.float32)
 
     if enable_xformers_memory_efficient_attention:
         pipeline.enable_xformers_memory_efficient_attention()

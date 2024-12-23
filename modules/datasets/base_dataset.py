@@ -4,7 +4,8 @@ import time
 import random
 import functools
 from PIL import Image
-from waifuset import HuggingFaceData, DictDataset, FastDataset
+from waifuset import DictDataset, FastDataset
+from waifuset import HuggingFaceData
 from waifuset import logging
 from waifuset import const
 from ml_collections import ConfigDict
@@ -218,7 +219,7 @@ class BaseDataset(torch.utils.data.Dataset, class_utils.FromConfigMixin):
         return dataset
 
     def get_data_existence(self, img_md):
-        if isinstance(img_md, HuggingFaceData):
+        if isinstance(img_md, (HuggingFaceData,)) or 'indexkits' in img_md.__class__.__name__.lower():
             return True
         return os.path.exists(img_md.get('image_path', '')) or os.path.exists(img_md.get('cache_path', ''))
 

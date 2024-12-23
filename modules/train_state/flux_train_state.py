@@ -78,7 +78,7 @@ class FluxTrainState(SD15TrainState):
         self.logger.print(f"diffusion model saved to: `{logging.yellow(save_dir)}`")
         return save_dir
 
-    def get_pipeline(self):
+    def get_pipeline_psi(self):
         return self.pipeline_class(
             transformer=self.unwrap_model(self.nnet),
             vae=self.unwrap_model(self.vae),

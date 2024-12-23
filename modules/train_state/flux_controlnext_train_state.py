@@ -6,7 +6,7 @@ class FluxControlNeXtTrainState(FluxTrainState, ControlNeXtTrainState):
     def save_diffusion_model(self):
         return ControlNeXtTrainState.save_diffusion_model(self)
 
-    def get_pipeline(self):
+    def get_pipeline_psi(self):
         return self.pipeline_class(
             transformer=self.unwrap_model(self.nnet),
             vae=self.unwrap_model(self.vae),

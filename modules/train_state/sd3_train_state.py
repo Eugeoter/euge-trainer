@@ -6,12 +6,12 @@ from waifuset import logging
 class SD3TrainState(SD15TrainState):
     def save_diffusion_model(self):
         save_path = os.path.join(self.output_model_dir, f"{self.output_name['models']}_ep{self.epoch}_step{self.global_step}")
-        pipeline = self.get_pipeline()
+        pipeline = self.get_pipeline_psi()
         pipeline.save_pretrained(save_path)
         self.logger.print(f"diffusion model saved to: `{logging.yellow(save_path)}`")
         return save_path
 
-    def get_pipeline(self):
+    def get_pipeline_psi(self):
         return self.pipeline_class(
             transformer=self.unwrap_model(self.nnet),
             vae=self.unwrap_model(self.vae),

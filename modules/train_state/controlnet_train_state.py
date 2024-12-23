@@ -26,7 +26,7 @@ class ControlNetTrainState(SD15TrainState):
     def save_diffusion_model(self):
         return None
 
-    def get_pipeline(self):
+    def get_pipeline_psi(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=self.unwrap_model(self.text_encoder),

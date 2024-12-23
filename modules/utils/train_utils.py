@@ -186,13 +186,16 @@ def transform_models_if_DDP(models):
     return [model.module if type(model) == DDP else model for model in models if model is not None]
 
 
-def get_optimizer(config, trainable_params):
+def get_optimizer(
+    optimizer_type,
+    trainable_params,
+    lr,
+    lr_scheduler_type,
+    **optimizer_kwargs,
+):
     # "Optimizer to use: AdamW, AdamW8bit, Lion, SGDNesterov, SGDNesterov8bit, PagedAdamW8bit, PagedAdamW32bit, Lion8bit, PagedLion8bit, DAdaptation(DAdaptAdamPreprint), DAdaptAdaGrad, DAdaptAdam, DAdaptAdan, DAdaptAdanIP, DAdaptLion, DAdaptSGD, Adafactor"
 
-    optimizer_type = config.optimizer_type.lower()
-    optimizer_kwargs = config.optimizer_kwargs
-
-    lr = config.learning_rate
+    optimizer_type = optimizer_type.lower()
     optimizer = None
 
     if optimizer_type == "Lion".lower():
@@ -359,7 +362,6 @@ def get_optimizer(config, trainable_params):
             logger.print(f"relative_step is true")
             if lr != 0.0:
                 logger.print(f"learning rate is used as initial_lr")
-            config.learning_rate = None
 
             if type(trainable_params) == list and type(trainable_params[0]) == dict:
                 has_group_lr = False
@@ -369,20 +371,18 @@ def get_optimizer(config, trainable_params):
 
                 if has_group_lr:
                     logger.print(f"unet_lr and text_encoder_lr are ignored")
-                    config.unet_lr = None
-                    config.text_encoder_lr = None
 
-            if config.lr_scheduler != "adafactor":
+            if lr_scheduler_type != "adafactor":
                 logger.print(f"use adafactor_scheduler")
-            config.lr_scheduler = f"adafactor:{lr}"  # ちょっと微妙だけど
+            lr_scheduler_type = f"adafactor:{lr}"  # ちょっと微妙だけど
 
             lr = None
         else:
-            if config.max_grad_norm != 0.0:
-                logger.print(
-                    f"because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0"
-                )
-            if config.lr_scheduler != "constant_with_warmup":
+            # if config.max_grad_norm != 0.0:
+            #     logger.print(
+            #         f"because max_grad_norm is set, clip_grad_norm is enabled. consider set to 0"
+            #     )
+            if lr_scheduler_type != "constant_with_warmup":
                 logger.print(f"constant_with_warmup will be good")
             if optimizer_kwargs.get("clip_threshold", 1.0) != 1.0:
                 logger.print(f"clip_threshold=1.0 will be good")
@@ -403,8 +403,7 @@ def get_optimizer(config, trainable_params):
 
     if optimizer is None:
         # 任意のoptimizerを使う
-        optimizer_type = config.optimizer_type  # lowerでないやつ（微妙）
-        logger.print(f"use {optimizer_type} | {optimizer_kwargs}")
+        logger.info(f"use {optimizer_type} | {optimizer_kwargs}")
         if "." not in optimizer_type:
             optimizer_module = torch.optim
         else:
@@ -418,34 +417,35 @@ def get_optimizer(config, trainable_params):
     return optimizer
 
 
-def get_scheduler_fix(config, optimizer: Optimizer, num_train_steps):
+def get_scheduler_fix(
+    lr_scheduler_type: str,
+    optimizer: Optimizer,
+    num_train_steps,
+    num_warmup_steps: Optional[int] = None,
+    num_cycles: int = 1,
+    power: float = 1.0,
+    **lr_scheduler_kwargs,
+):
     """
     Unified API to get any scheduler from its name.
     """
-    name = config.lr_scheduler
-    num_warmup_steps: Optional[int] = config.lr_warmup_steps
-    num_cycles = config.lr_scheduler_num_cycles
-    power = config.lr_scheduler_power
-
-    lr_scheduler_kwargs = config.lr_scheduler_kwargs
-
     def wrap_check_needless_num_warmup_steps(return_vals):
         if num_warmup_steps is not None and num_warmup_steps != 0:
-            raise ValueError(f"{name} does not require `num_warmup_steps`. Set None or 0.")
+            raise ValueError(f"{lr_scheduler_type} does not require `num_warmup_steps`. Set None or 0.")
         return return_vals
 
-    if name.startswith("adafactor"):
+    if lr_scheduler_type.startswith("adafactor"):
         assert (
             type(optimizer) == transformers.optimization.Adafactor
         ), f"adafactor scheduler must be used with Adafactor optimizer / adafactor schedulerはAdafactorオプティマイザと同時に使ってください"
-        initial_lr = float(name.split(":")[1])
+        initial_lr = float(lr_scheduler_type.split(":")[1])
         # LOGGER.print("adafactor scheduler init lr", initial_lr)
         return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
 
-    name = SchedulerType(name)
-    schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
+    lr_scheduler_type = SchedulerType(lr_scheduler_type)
+    schedule_func = TYPE_TO_SCHEDULER_FUNCTION[lr_scheduler_type]
 
-    if name == SchedulerType.CONSTANT:
+    if lr_scheduler_type == SchedulerType.CONSTANT:
         return wrap_check_needless_num_warmup_steps(schedule_func(optimizer, **lr_scheduler_kwargs))
 
     # if name == SchedulerType.PIECEWISE_CONSTANT:
@@ -453,17 +453,17 @@ def get_scheduler_fix(config, optimizer: Optimizer, num_train_steps):
 
     # All other schedulers require `num_warmup_steps`
     if num_warmup_steps is None:
-        raise ValueError(f"{name} requires `num_warmup_steps`, please provide that argument.")
+        raise ValueError(f"{lr_scheduler_type} requires `num_warmup_steps`, please provide that argument.")
 
-    if name == SchedulerType.CONSTANT_WITH_WARMUP:
+    if lr_scheduler_type == SchedulerType.CONSTANT_WITH_WARMUP:
         # logger.debug(f"optimizer: {optimizer}, num_warmup_steps: {num_warmup_steps}, lr_scheduler_kwargs: {lr_scheduler_kwargs}")
         return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, **lr_scheduler_kwargs)
 
     # All other schedulers require `num_training_steps`
     if num_train_steps is None:
-        raise ValueError(f"{name} requires `num_training_steps`, please provide that argument.")
+        raise ValueError(f"{lr_scheduler_type} requires `num_training_steps`, please provide that argument.")
 
-    if name == SchedulerType.COSINE_WITH_RESTARTS:
+    if lr_scheduler_type == SchedulerType.COSINE_WITH_RESTARTS:
         return schedule_func(
             optimizer,
             num_warmup_steps=num_warmup_steps,
@@ -472,7 +472,7 @@ def get_scheduler_fix(config, optimizer: Optimizer, num_train_steps):
             **lr_scheduler_kwargs,
         )
 
-    if name == SchedulerType.POLYNOMIAL:
+    if lr_scheduler_type == SchedulerType.POLYNOMIAL:
         return schedule_func(
             optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_train_steps, power=power, **lr_scheduler_kwargs
         )

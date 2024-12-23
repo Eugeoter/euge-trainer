@@ -5,14 +5,14 @@ import re
 import copy
 from typing import Literal, Dict, Any, List, Tuple
 from waifuset import logging
-from ..models.sd15.hadamard_multi_lora_adapter import HadamardMultiLoRAWrapper
+from ..models.sd15.lora_adapter import ElementWiseMultiLoRAAdapter
 
 logger = logging.get_logger("merge lora")
 
 
-UNET_TARGET_REPLACE_MODULE = ["Transformer2DModel"] + [HadamardMultiLoRAWrapper]
-UNET_TARGET_REPLACE_MODULE_CONV2D_3X3 = ["ResnetBlock2D", "Downsample2D", "Upsample2D"] + [HadamardMultiLoRAWrapper]
-TEXT_ENCODER_TARGET_REPLACE_MODULE = ["CLIPAttention", "CLIPMLP"] + ["CLIPSdpaAttention"] + [HadamardMultiLoRAWrapper]
+UNET_TARGET_REPLACE_MODULE = ["Transformer2DModel"] + [ElementWiseMultiLoRAAdapter]
+UNET_TARGET_REPLACE_MODULE_CONV2D_3X3 = ["ResnetBlock2D", "Downsample2D", "Upsample2D"] + [ElementWiseMultiLoRAAdapter]
+TEXT_ENCODER_TARGET_REPLACE_MODULE = ["CLIPAttention", "CLIPMLP"] + ["CLIPSdpaAttention"] + [ElementWiseMultiLoRAAdapter]
 LORA_PREFIX_UNET = "lora_unet"
 LORA_PREFIX_TEXT_ENCODER = "lora_te"
 
@@ -148,7 +148,7 @@ def make_lora_name_to_lora_wrapper_map(modules, model_type: Literal['sdxl', 'sd1
                 if debug_te and "lora_te" in prefix:
                     logger.debug(f"enter {logging.green(module.__class__.__name__)}")
                 for child_name, child_module in module.named_modules():
-                    if "LoRAWrapper" in child_module.__class__.__name__:
+                    if "LoRAAdapter" in child_module.__class__.__name__:
                         lora_name = prefix + "." + name + "." + child_name
                         lora_name = lora_name.replace(".", "_")
                         name_to_module[lora_name] = child_module
@@ -222,7 +222,7 @@ def make_lora_name_to_weight_shape_map(
 def merge_loras_to_model(
     models: Dict[str, Any],
     lora_state_dicts,
-    lora_ratios,
+    lora_strength,
     model_type: Literal['sdxl', 'sd15'] = 'sd15',
     merge_device='cpu',
     merge_dtype=torch.float32,
@@ -263,7 +263,7 @@ def merge_loras_to_model(
     # Create module map
     name_to_module = name_to_module or make_lora_name_to_module_map(modules, model_type)
 
-    for lora_state_dict, ratios in logger.tqdm(zip(lora_state_dicts, lora_ratios), desc="lora", position=0, total=len(lora_state_dicts), leave=True, disable=not verbose):
+    for lora_state_dict, ratios in logger.tqdm(zip(lora_state_dicts, lora_strength), desc="lora", position=0, total=len(lora_state_dicts), leave=True, disable=not verbose):
         for key in logger.tqdm(lora_state_dict.keys(), desc="merge", position=1, leave=True, disable=not verbose):
             if "lora_down" in key:
                 up_key = key.replace("lora_down", "lora_up")
@@ -470,8 +470,8 @@ def wrap_lora_to_model(
             up_weight = lora_state_dict[up_key]
             alpha = lora_state_dict.get(alpha_key, down_weight.size(0))
 
-            # Wrap the module with LoRAWrapper
-            wrapped_module = HadamardMultiLoRAWrapper(module, up_weight, down_weight, alpha, ratio)
+            # Wrap the module with LoRAAdapter
+            wrapped_module = ElementWiseMultiLoRAAdapter(module, up_weight, down_weight, alpha, ratio)
 
             # Set the wrapped module to the model
             set_module_by_name(models, module_name, wrapped_module)
@@ -482,12 +482,12 @@ def wrap_lora_to_model(
 def wrap_loras_to_model(
     models: Dict[str, nn.Module],
     lora_state_dicts: List[Dict[str, torch.Tensor]],
-    init_module_ratio: float = None,
-    init_lora_ratios: List[float] = None,
+    init_w0: float = None,
+    init_w1: List[float] = None,
     model_type: Literal['sdxl', 'sd15'] = 'sd15',
     lora_name_to_module=None,
     lora_name_to_module_name=None,
-    lora_wrapper_class=HadamardMultiLoRAWrapper,
+    lora_wrapper_class=ElementWiseMultiLoRAAdapter,
     inplace=False,
     verbose=False,
 ) -> Dict[str, nn.Module]:
@@ -535,8 +535,8 @@ def wrap_loras_to_model(
                 down_weights=[uda[1] for uda in udas],
                 alphas=[uda[2] for uda in udas],
                 lora_name=lora_name,
-                init_module_ratio=init_module_ratio,
-                init_lora_ratios=init_lora_ratios,
+                init_w0=init_w0,
+                init_w1=init_w1,
             )
             if lora_name not in lora_name_to_module_name:
                 raise ValueError(f"LoRA module name {lora_name} not found in module name map")
@@ -577,8 +577,8 @@ def set_ratios_to_warped_model(
     lora_name_to_module = lora_name_to_module or make_lora_name_to_lora_wrapper_map(modules, model_type)
 
     for lora_name, module in logger.tqdm(lora_name_to_module.items(), desc="merge lora", position=1, leave=True, disable=not verbose):
-        # if not isinstance(module, MultiLoRAWrapper):
-        #     raise ValueError(f"Module {module.__class__.__name__} (lora name is {lora_name}) is not a {MultiLoRAWrapper.__name__}")
+        # if not isinstance(module, MultiLoRAAdapter):
+        #     raise ValueError(f"Module {module.__class__.__name__} (lora name is {lora_name}) is not a {MultiLoRAAdapter.__name__}")
 
         if lora_name not in lora_name_to_ratios:
             # logging.debug(f"skip {logging.red(lora_name)}")

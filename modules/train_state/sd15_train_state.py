@@ -1,9 +1,11 @@
 import os
 import random
+import numpy as np
+import torch
 from diffusers import DiffusionPipeline
 from waifuset import logging
 from .base_train_state import BaseTrainState
-from ..utils import class_utils, eval_utils, sd15_model_utils
+from ..utils import class_utils, eval_utils, sd15_model_utils, advanced_train_utils
 
 logger = logging.get_logger("train")
 
@@ -31,6 +33,11 @@ class SD15TrainState(BaseTrainState):
     )
 
     sample_to_wandb: bool = True
+
+    plot_edm2: bool = True
+    plot_edm2_every_n_steps: int = 100
+    save_edm2: bool = True
+    save_edm2_every_n_steps: int = None
 
     # @classmethod
     # def from_config(
@@ -99,7 +106,7 @@ class SD15TrainState(BaseTrainState):
             **sampler_kwargs,
         )
 
-    def get_pipeline(self) -> DiffusionPipeline:
+    def get_pipeline_psi(self) -> DiffusionPipeline:
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=self.unwrap_model(self.text_encoder),
@@ -121,7 +128,7 @@ class SD15TrainState(BaseTrainState):
         if self.accelerator.is_main_process:
             try:
                 sample_dir = os.path.join(self.output_dir, self.output_subdir.samples, f"ep{self.epoch}_step{self.global_step}")
-                pipeline = self.get_pipeline()
+                pipeline = self.get_pipeline_psi()
                 # pipeline.set_use_memory_efficient_attention_xformers(self.use_xformers)
                 self.sample_images(pipeline, sample_dir, benchmark, on_epoch_end=on_epoch_end)
                 self.logger.info(f"Sampled images saved to: `{logging.yellow(sample_dir)}`")
@@ -198,3 +205,27 @@ class SD15TrainState(BaseTrainState):
                         sample['control_image'] = self.valid_dataset.get_control_image(img_md, type='pil')
                     samples.append(sample)
             return samples
+
+    def trigger_edm2_plot_event(self):
+        if self.use_edm2 and self.plot_edm2 and self.plot_edm2_every_n_steps and self.global_step % self.plot_edm2_every_n_steps == 0:
+            save_dir = os.path.join(self.output_dir, self.output_subdir.logs, 'edm2')
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"edm2_plot_step{self.global_step}.png")
+            advanced_train_utils.plot_dynamic_loss_weighting(
+                save_path=save_path,
+                model=self.edm2_mlp,
+                num_timesteps=self.noise_scheduler.config.num_train_timesteps if self.max_timestep is None else self.max_timestep,
+            )
+            self.logger.info(f"edm2 plot saved to: `{logging.green(save_path)}`", write=True)
+
+    def trigger_edm2_save_event(self):
+        if self.use_edm2 and self.save_edm2 and self.global_step > 0 and self.save_edm2_every_n_steps and self.global_step % self.save_edm2_every_n_steps == 0:
+            save_dir = os.path.join(self.output_dir, self.output_subdir.logs, 'edm2')
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"edm2_weights_step{self.global_step}.npy")
+            timesteps = torch.arange(0, 1000, device="cuda")
+            with torch.no_grad():
+                adaptive_loss_weights = self.edm2_mlp._forward(timesteps)
+                adaptive_loss_weights = 1 / torch.exp(adaptive_loss_weights)
+            np.save(save_path, adaptive_loss_weights.detach().cpu().numpy())
+            self.logger.info(f"edm2 weights saved to: `{logging.green(save_path)}`", write=True)

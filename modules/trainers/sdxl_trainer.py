@@ -79,7 +79,7 @@ class SDXLTrainer(SD15Trainer):
             lora_utils.merge_loras_to_model(
                 self.models,
                 lora_state_dicts=[lora_state_dict],
-                lora_ratios=[1.0],
+                lora_strength=[1.0],
                 merge_device=self.nnet.device,
                 merge_dtype=self.nnet.dtype,
                 inplace=True,
