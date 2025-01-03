@@ -19,7 +19,7 @@ huggingface-hub
 peft
 sentencepiece
 tqdm
-waifuset==0.2.11
+waifuset
 matplotlib
 controlnet_aux
 wandb

@@ -435,10 +435,10 @@ class SD15Trainer(BaseTrainer):
                 )
                 self.edm2_optimizer = self.accelerator.prepare(self.edm2_optimizer)
 
-            if self.edm2_lr_scheduler_type is not None:
+            if self.edm2_lr_scheduler_type is not None:  # use lr_scheduler directly
                 self.logger.info(f"Set lr scheduler for adaptive loss weighting to {logging.yellow(self.edm2_lr_scheduler_type)}")
                 self.edm2_lr_scheduler = self.lr_scheduler
-            elif self.edm2_lr_scheduler_type == 'auto':
+            elif self.edm2_lr_scheduler_type == 'auto':  # use lr_lambda
                 self.logger.info(f"Use auto lr scheduler for adaptive loss weighting")
 
                 def lr_lambda(current_step: int):
@@ -454,7 +454,7 @@ class SD15Trainer(BaseTrainer):
                     lr_lambda=lr_lambda
                 )
                 self.edm2_lr_scheduler = self.accelerator.prepare(self.edm2_lr_scheduler)
-            else:
+            else:  # use edm2_lr_scheduler_type
                 self.logger.info(f"Use constant lr scheduler for adaptive loss weighting: {logging.yellow(self.edm2_lr_scheduler_type)}")
                 self.edm2_lr_scheduler = train_utils.get_scheduler_fix(
                     lr_scheduler_type=self.edm2_lr_scheduler_type,

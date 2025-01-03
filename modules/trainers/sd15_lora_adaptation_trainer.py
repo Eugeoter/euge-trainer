@@ -1,10 +1,11 @@
 import torch
+from torch import nn
 from ml_collections import ConfigDict
-from typing import Dict, List, Union
+from typing import Dict, List, Union, Literal
 from safetensors.torch import load_file
 from waifuset import logging
 from .sd15_trainer import SD15Trainer
-from ..utils import lora_utils, sd15_train_utils
+from ..utils import lora_utils, sd15_train_utils, vae_train_utils
 from ..models.sd15 import lora_adapter
 from ..train_state.sd15_lora_adaptation_train_state import SD15LoRAAdaptationTrainState
 
@@ -23,6 +24,7 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
     text_encoder_psi: torch.nn.Module
 
     lora_adapter_class = lora_adapter.LayerWiseMultiLoRAAdapter
+    lora_adapter_type: Literal['layerwise', 'elementwise'] = 'layerwise'
     lr_w0: float = None
     lr_w1: List[float] = None
 
@@ -38,6 +40,15 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
     lora_strength: List[float] = None
 
     lambda_lpips: float = 0
+
+    use_gan: bool = False
+    use_lecam: bool = False
+    gan_disc_type: str = "bce"
+    lecam_loss_weight = 0.1
+    lecam_anchor_real_logits = 0.0
+    lecam_anchor_fake_logits = 0.0
+    lecam_beta = 0.9
+    lr_discriminator: float = 1e-3
 
     def get_setups(self):
         return super().get_setups() + [self.setup_lpips]
@@ -150,6 +161,13 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         if not hasattr(self, 'text_encoder'):
             raise ValueError("text_encoder is not loaded yet, please load text_encoder first.")
 
+        if self.lora_adapter_type == 'layerwise':
+            self.lora_adapter_class = lora_adapter.LayerWiseMultiLoRAAdapter
+        elif self.lora_adapter_type == 'elementwise':
+            self.lora_adapter_class = lora_adapter.ElementWiseMultiLoRAAdapter
+        else:
+            raise ValueError(f"Invalid lora_adapter_type: {self.lora_adapter_type}, expected 'layerwise' or 'elementwise'")
+
         self.lora_name_to_orig_module = lora_utils.make_lora_name_to_module_map([self.nnet, self.text_encoder], model_type=self.backbone_type, debug_te=False)
         self.lora_name_to_orig_module_name = lora_utils.make_lora_name_to_module_name_map([self.nnet, self.text_encoder], model_type=self.backbone_type)
 
@@ -198,6 +216,15 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         # device_utils.clean_memory()
 
         return self.models_psi
+
+    def load_discriminator_model(self):
+        discriminator = vae_train_utils.PatchDiscriminator().cuda()
+        return {'discriminator': discriminator}
+
+    def setup_discriminator_params(self):
+        self.discriminator.requires_grad_(True)
+        self.discriminator.to(self.device)
+        return [self.discriminator], [{'params': self.discriminator.parameters(), 'lr': self.lr_discriminator}]
 
     def setup_phi_params(self):
         self.nnet_phi.requires_grad_(False)
@@ -309,6 +336,52 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
                 self.logger.error(f"Error in calculating LPIPS loss: {e}. Model pred shape: {model_pred.shape}, target shape: {target.shape}")
                 lpips_loss_batch = torch.tensor(0.0, device=self.device, dtype=self.weight_dtype)
             loss += self.lambda_lpips * lpips_loss_batch
+
+        if self.use_gan:
+            real_preds = self.discriminator(target)
+            fake_preds = self.discriminator(model_pred.detach())
+            d_loss, avg_real_logits, avg_fake_logits, disc_acc = vae_train_utils.gan_disc_loss(
+                real_preds, fake_preds, self.gan_disc_type
+            )
+
+            avg_real_logits = vae_train_utils.avg_scalar_over_nodes(avg_real_logits, self.device)
+            avg_fake_logits = vae_train_utils.avg_scalar_over_nodes(avg_fake_logits, self.device)
+
+            lecam_anchor_real_logits = (
+                self.lecam_beta * lecam_anchor_real_logits
+                + (1 - self.lecam_beta) * avg_real_logits
+            )
+            lecam_anchor_fake_logits = (
+                self.lecam_beta * lecam_anchor_fake_logits
+                + (1 - self.lecam_beta) * avg_fake_logits
+            )
+            total_d_loss = d_loss.mean()
+            d_loss_item = total_d_loss.item()
+            if self.use_lecam:
+                # penalize the real logits to fake and fake logits to real.
+                lecam_loss = (real_preds - lecam_anchor_fake_logits).pow(
+                    2
+                ).mean() + (fake_preds - lecam_anchor_real_logits).pow(2).mean()
+                lecam_loss_item = lecam_loss.item()
+                total_d_loss = total_d_loss + lecam_loss * self.lecam_loss_weight
+
+        if self.use_gan:
+            recon_for_gan = vae_train_utils.gradnorm(model_pred, weight=1.0)
+            fake_preds = self.discriminator(recon_for_gan)
+            real_preds_const = real_preds.clone().detach()
+            # loss where (real > fake + 0.01)
+            # g_gan_loss = (real_preds_const - fake_preds - 0.1).relu().mean()
+            if self.gan_disc_type == "bce":
+                g_gan_loss = nn.functional.binary_cross_entropy_with_logits(
+                    fake_preds, torch.ones_like(fake_preds)
+                )
+            elif self.gan_disc_type == "hinge":
+                g_gan_loss = -fake_preds.mean()
+
+            g_gan_loss = g_gan_loss.item()
+        else:
+            g_gan_loss = 0.0
+
         return loss
 
     def setup_lpips(self):

@@ -40,10 +40,8 @@ class SD15ControlNetTrainer(SD15Trainer):
                     self.controlnet_model_name_or_path,
                     use_safetensors=os.path.splitext(self.controlnet_model_name_or_path)[1] == ".safetensors",
                 )
-            elif os.path.isdir(self.controlnet_model_name_or_path):
-                controlnet = self.controlnet_class.from_pretrained(self.controlnet_model_name_or_path)
             else:
-                raise ValueError(f"Invalid controlnet model name or path: {self.controlnet_model_name_or_path}")
+                controlnet = self.controlnet_class.from_pretrained(self.controlnet_model_name_or_path)
             self.logger.info(f"Controlnet model loaded from {self.controlnet_model_name_or_path}")
         else:
             controlnet = self.controlnet_class.from_unet(self.nnet)

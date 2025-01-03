@@ -75,7 +75,7 @@ class ControlNetDataset(T2IDataset):
             if self.control_image_cache_dir:
                 if not os.path.exists(control_image_cache_path):
                     control_image.save(control_image_cache_path)
-        elif self.control_image_getter and (control_image := (self.control_image_getter(img_md, **self.control_image_getter_kwargs))) is not None:
+        elif self.control_image_getter and (control_image := (self.control_image_getter(self.open_image(img_md), **self.control_image_getter_kwargs))) is not None:
             if isinstance(control_image, Image.Image):
                 pass
             elif isinstance(control_image, np.ndarray):
