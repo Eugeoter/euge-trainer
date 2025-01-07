@@ -8,13 +8,16 @@
 # 更新
 加入了对tile模型的训练支持，下面是tile模型的训练方式
 
+
 启动config.control_image_getter参数
 
 并将config.control_image_type参数注释掉
+```
 
 #config.control_image_type = "canny"
 
 config.control_image_getter = get_random_tile_condition
+```
 
 可以在己有ControlNet模型上继续训练
 
