@@ -56,16 +56,15 @@ data/
 
 完整的参数介绍请参考 [docs/config.md](docs/config.md)。
 
-```
 
-```
+
 ## 解压arrow文件
 import os
 import tqdm
-
+```
 arrow_file = r"C:\Users\xx\Downloads\00000.arrow"
 save_dir = r"D:\data\openpose"
-
+```
 save_image_dir = os.path.join(save_dir, 'image')
 save_condition_image_dir = os.path.join(save_dir, 'condition_image')
 os.makedirs(save_image_dir, exist_ok=True)
