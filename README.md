@@ -5,6 +5,22 @@
 # 特性
 
 在 kohya-ss 的基础上，对训练脚本进行了优化。支持 HuggingFace 数据集，支持多 GPU 训练，支持元数据文件，支持缓存潜变量。
+# 更新
+加入了对tile模型的训练支持，下面是tile模型的训练方式
+
+启动config.control_image_getter参数
+
+并将config.control_image_type参数注释掉
+
+#config.control_image_type = "canny"
+
+config.control_image_getter = get_random_tile_condition
+
+可以在己有ControlNet模型上继续训练
+
+使用controlnet_model_name_or_path参数即可
+
+
 
 # 使用方法
 
@@ -43,3 +59,49 @@ data/
 ```
 
 ```
+## 解压arrow文件
+import os
+import tqdm
+
+arrow_file = r"C:\Users\xx\Downloads\00000.arrow"
+save_dir = r"D:\data\openpose"
+
+save_image_dir = os.path.join(save_dir, 'image')
+save_condition_image_dir = os.path.join(save_dir, 'condition_image')
+os.makedirs(save_image_dir, exist_ok=True)
+os.makedirs(save_condition_image_dir, exist_ok=True)
+
+with pa.OSFile(arrow_file, 'rb') as source:
+    with pa.RecordBatchFileReader(source) as reader:
+        table = reader.read_all()
+
+        for i, row in tqdm.tqdm(table.to_pandas().iterrows()):
+            image = row['image']
+            condition_image = row['condition_image']
+            meta_info = row['meta_info']
+            image_key = 'danbooru_' + str(meta_info['danbooru_pid'])
+            caption = meta_info['caption_base'].replace('|||', '')
+            with open(os.path.join(save_image_dir, image_key + '.png'), 'wb') as f:
+                f.write(image)
+            with open(os.path.join(save_condition_image_dir, image_key + '.png'), 'wb') as f:
+                f.write(condition_image)
+            with open(os.path.join(save_image_dir, image_key + '.txt'), 'w') as f:
+                f.write(caption)
+
+print(f"完成，共处理了{len(table)}张图片")
+## 配置文件夹加入预处理文件的路径
+```
+config.dataset_source = [
+    dict(
+        name_or_path=r"图片文件夹路径",
+        read_attrs=True,
+    ),
+    dict(
+        name_or_path=r"控制图片文件夹路径",
+        column_mapping={
+            'image_path': 'control_image_path'
+        }
+    )
+]
+```
+    
