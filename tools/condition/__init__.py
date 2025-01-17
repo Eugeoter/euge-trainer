@@ -306,3 +306,46 @@ def get_random_inpaint_mask_condition(
         variants_n=variants_n,
     )
     return np.array(inpaint_condition)
+
+
+def get_random_inpainting_masked_image_condition(
+    image: Union[Dict[str, Any], Image.Image],
+    box_proba=1/2,
+    bbox_min_size=30,
+    bbox_max_size=400,
+    bbox_min_times=0,
+    bbox_max_times=3,
+    irregular_proba=1/2,
+    irregular_max_angle=6,
+    irregular_max_len=240,
+    irregular_max_width=80,
+    irregular_min_times=0,
+    irregular_max_times=3,
+    superres_proba=0,
+    segm_proba=0,
+    variants_n=1,
+) -> np.ndarray:
+    from .inpaint import get_random_inpaint_mask
+    if isinstance(image, dict):
+        img_path = image['image_path']
+        image = Image.open(img_path)
+    mask = get_random_inpaint_mask(
+        image,
+        box_proba=box_proba,
+        bbox_min_size=bbox_min_size,
+        bbox_max_size=bbox_max_size,
+        bbox_min_times=bbox_min_times,
+        bbox_max_times=bbox_max_times,
+        irregular_proba=irregular_proba,
+        irregular_max_angle=irregular_max_angle,
+        irregular_max_len=irregular_max_len,
+        irregular_max_width=irregular_max_width,
+        irregular_min_times=irregular_min_times,
+        irregular_max_times=irregular_max_times,
+        superres_proba=superres_proba,
+        segm_proba=segm_proba,
+        variants_n=variants_n,
+    )
+    masked_image = np.array(image)
+    masked_image[mask] = 0
+    return masked_image
