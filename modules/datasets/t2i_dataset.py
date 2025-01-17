@@ -78,7 +78,7 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
                 if self.keep_cached_latents_in_memory:
                     img_md.update(cache)
             else:
-                image = self.get_bucket_image(img_md)
+                image: torch.Tensor = self.get_image_tensor(img_md)
                 if image is None:
                     raise FileNotFoundError(f"Image and cache not found for `{img_key}`")
                 if is_flipped:
@@ -204,10 +204,12 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
         elif os.path.exists(img_path := img_md.get('image_path', '')):
             image = Image.open(img_path)
         else:
-            return None
+            image = None
+        if image is None:
+            self.logger.error(f"Missing image for data {img_md.get('image_key')}")
         return image
 
-    def get_image(self, img_md):
+    def get_image(self, img_md) -> np.ndarray:
         image = self.open_image(img_md)
         if image is None:
             return None
@@ -216,7 +218,7 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
         image = np.array(image, np.uint8)  # (H, W, C)
         return image
 
-    def get_bucket_image(self, img_md) -> torch.Tensor:
+    def get_bucket_image(self, img_md) -> np.ndarray:
         image = self.get_image(img_md)
         if image is None:
             return None
@@ -224,8 +226,12 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
         crop_ltrb = self.get_crop_ltrb(img_md, update=True)
         image = dataset_utils.crop_ltrb_if_needed(image, crop_ltrb)
         image = dataset_utils.resize_if_needed(image, bucket_size, resampling=self.image_resampling)
-        image = dataset_utils.IMAGE_TRANSFORMS(image)
         img_md['crop_ltrb'] = crop_ltrb  # crop_ltrb: (left, top, right, bottom), set for sdxl
+        return image
+
+    def get_image_tensor(self, img_md) -> torch.Tensor:
+        image = self.get_bucket_image(img_md)
+        image = dataset_utils.IMAGE_TRANSFORMS(image)
         return image
 
     def get_crop_ltrb(self, img_md, update=True):

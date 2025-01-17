@@ -38,6 +38,9 @@ def main(argv):
     elif trainer == 'sdxl_distill':
         from modules.trainers.sdxl_distill_trainer import SDXLDistillTrainer
         trainer_class = SDXLDistillTrainer
+    elif trainer == 'sdxl_inpainting':
+        from modules.trainers.sdxl_inpainting_trainer import SDXLInpaintingTrainer
+        trainer_class = SDXLInpaintingTrainer
     elif trainer == 'hunyuan_controlnext':
         from modules.trainers.hunyuan_controlnext_trainer import HunyuanControlNeXtTrainer
         trainer_class = HunyuanControlNeXtTrainer

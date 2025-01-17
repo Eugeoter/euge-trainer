@@ -977,7 +977,7 @@ class SDXLStableDiffusionLongPromptWeightingPipeline:
         else:
             orig_size = target_size
         crop_size = torch.zeros_like(orig_size)
-        embs = sdxl_train_utils.get_size_embeddings(orig_size, crop_size, target_size, device).to(dtype)
+        embs = sdxl_train_utils.get_size_embeddings_kohya(orig_size, crop_size, target_size, device).to(dtype)
 
         # make conditionings
         if do_classifier_free_guidance:

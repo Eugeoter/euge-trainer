@@ -252,7 +252,7 @@ class HunyuanTrainer(SD15Trainer):
         latents *= self.vae_scale_factor
 
         with torch.set_grad_enabled(self.train_text_encoder):
-            encoder_hidden_states, text_embedding_mask, encoder_hidden_states_t5, text_embedding_mask_t5 = self.encode_caption(
+            encoder_hidden_states, text_embedding_mask, encoder_hidden_states_t5, text_embedding_mask_t5 = self.encode_caption_kohya(
                 batch["captions"],
             )
             if self.full_fp16:
@@ -391,7 +391,7 @@ class HunyuanTrainer(SD15Trainer):
             encoder_hidden_states_t5 = output_t5['hidden_states'][layer_index].detach()
         return encoder_hidden_states_t5, text_embedding_mask_t5
 
-    def encode_caption(self, captions, attention_mask=True, layer_index=-1):
+    def encode_caption_kohya(self, captions, attention_mask=True, layer_index=-1):
         encoder_hidden_states, text_embedding_mask = self._encode_caption_with_bert(captions)
         if self.dropout_t5:
             bs = len(captions)

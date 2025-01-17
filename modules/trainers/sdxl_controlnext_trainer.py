@@ -11,12 +11,12 @@ from ..pipelines.sdxl_controlnext_lpw_pipeline import StableDiffusionXLControlNe
 # from ..models.sd15.controlnext_nnet_pbh import UNet2DConditionModel as SDXLControlNeXtUNet2DConditionModel
 # from ..pipelines.sdxl_controlnext_pipeline import StableDiffusionXLControlNeXtPipeline
 
-from ..datasets.sdxl_controlnet_dataset import SDXLControlNetDataset
+from ..datasets.sdxl_image_condition_dataset import SDXLImageConditionDataset
 from ..train_state.sdxl_controlnext_train_state import SDXLControlNeXtTrainState
 
 
 class SDXLControlNeXtTrainer(SD15ControlNeXtTrainer, SDXLTrainer):
-    dataset_class = SDXLControlNetDataset
+    dataset_class = SDXLImageConditionDataset
     nnet_class = SDXLControlNeXtUNet2DConditionModel
     controlnext_class = ControlNetModel
     pipeline_class = StableDiffusionXLControlNeXtPipeline
@@ -57,7 +57,8 @@ class SDXLControlNeXtTrainer(SD15ControlNeXtTrainer, SDXLTrainer):
         target_size = batch["target_size_hw"]
         orig_size = batch["original_size_hw"]
         crop_size = batch["crop_top_lefts"]
-        text_embedding, vector_embedding = self.get_embeddings(batch['captions'], target_size, orig_size, crop_size, batch['negative_captions'] if self.do_classifier_free_guidance else None)
+        text_embedding, vector_embedding = self.get_embeddings_kohya(batch['captions'], target_size, orig_size, crop_size, batch['negative_captions'] if self.do_classifier_free_guidance else None)
+        text_embedding = self.dropout_condition(text_embedding)
         text_embedding = text_embedding.to(self.weight_dtype)
         vector_embedding = vector_embedding.to(self.weight_dtype)
 
@@ -65,8 +66,8 @@ class SDXLControlNeXtTrainer(SD15ControlNeXtTrainer, SDXLTrainer):
         timesteps = self.get_timesteps(latents)
         noisy_latents = self.get_noisy_latents(latents, noise, timesteps).to(self.weight_dtype)
 
-        control_images = batch['control_images'].to(self.device, dtype=self.controlnext.dtype)
-        controls = self.controlnext(control_images, timesteps)
+        condition_images = batch['condition_images'].to(self.device, dtype=self.controlnext.dtype)
+        controls = self.controlnext(condition_images, timesteps)
         controls['scale'] = controls['scale'] * self.control_scale
         # added_cond_kwargs = {'text_embeds': pool2, 'time_ids': vector_embedding}
 

@@ -5,7 +5,7 @@ from ..models.flux.flux_controlnext_models import FluxWithControlNeXt
 from ..models.flux.flux_controlnext import ControlNetModel
 from ..pipelines.flux_controlnext_pipeline import FluxControlNeXtPipeline
 from ..train_state.flux_controlnext_train_state import FluxControlNeXtTrainState
-from ..datasets.controlnet_dataset import ControlNetDataset
+from ..datasets.image_condition_dataset import ImageConditionDataset
 from ..utils import flux_train_utils, flux_model_utils
 
 
@@ -13,7 +13,7 @@ class FluxControlNeXtTrainer(SD15ControlNeXtTrainer, FluxTrainer):
     nnet_class = FluxWithControlNeXt
     pipeline_class = FluxControlNeXtPipeline
     train_state_class = FluxControlNeXtTrainState
-    dataset_class = ControlNetDataset
+    dataset_class = ImageConditionDataset
     controlnext_class = ControlNetModel
 
     # def get_train_state(self):
@@ -45,7 +45,7 @@ class FluxControlNeXtTrainer(SD15ControlNeXtTrainer, FluxTrainer):
             with torch.no_grad():
                 latents = self.vae.encode(batch["images"].to(self.device, dtype=self.vae.dtype))
 
-        text_encoder_conds = self.encode_caption(batch['captions'])
+        text_encoder_conds = self.encode_caption_kohya(batch['captions'])
 
         # Sample noise that we'll add to the latents
         noise = torch.randn_like(latents)

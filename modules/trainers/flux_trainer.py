@@ -208,7 +208,7 @@ class FluxTrainer(SD15Trainer):
             with torch.no_grad():
                 latents = self.vae.encode(batch["images"].to(self.device, dtype=self.vae.dtype))
 
-        text_encoder_conds = self.encode_caption(batch['captions'])
+        text_encoder_conds = self.encode_caption_kohya(batch['captions'])
 
         # Sample noise that we'll add to the latents
         noise = torch.randn_like(latents)
@@ -262,7 +262,7 @@ class FluxTrainer(SD15Trainer):
         loss = loss.mean()
         return loss
 
-    def encode_caption(self, captions):
+    def encode_caption_kohya(self, captions):
         input_ids_list = [[ids[0] for ids in flux_train_utils.tokenize([self.tokenizer1, self.tokenizer2], caption, self.t5xxl_max_token_length)] for caption in captions]  # remove batch dimension
         input_ids_list = [torch.stack([input_ids[i] for input_ids in input_ids_list]).to(self.accelerator.device) for i in range(len(input_ids_list[0]))]  # stack to make a list of tensors
         with torch.no_grad():

@@ -7,7 +7,7 @@ from .sd15_train_state import SD15TrainState
 from ..utils import eval_utils
 
 
-class ControlNetTrainState(SD15TrainState):
+class SD15ControlNetTrainState(SD15TrainState):
     save_full_model: bool = False
     nnet_trainable_params: List[Union[str, re.Pattern]] = None
 
@@ -26,7 +26,7 @@ class ControlNetTrainState(SD15TrainState):
     def save_diffusion_model(self):
         return None
 
-    def get_pipeline_psi(self):
+    def get_pipeline(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=self.unwrap_model(self.text_encoder),

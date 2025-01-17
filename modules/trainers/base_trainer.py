@@ -860,13 +860,13 @@ class BaseTrainer(class_utils.FromConfigMixin):
     def zero_grad(self):
         self.optimizer.zero_grad(set_to_none=True)
 
-    def backward(self, loss):
+    def backward(self, loss, **kwargs):
         if self.use_deepspeed:
-            self.ds_model.backward(loss)
+            self.ds_model.backward(loss, **kwargs)
             last_batch_iteration = (self.train_state.global_step + 1) // (self.total_batch_size // (self.batch_size * self.accelerator.num_processes))
             self.ds_model.step(lr_kwargs={'last_batch_iteration': last_batch_iteration})
         else:
-            self.accelerator.backward(loss)
+            self.accelerator.backward(loss, **kwargs)
 
     def train_loop(self):
         while self.train_state.epoch < self.num_train_epochs:

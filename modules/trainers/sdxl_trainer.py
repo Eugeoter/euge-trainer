@@ -178,7 +178,7 @@ class SDXLTrainer(SD15Trainer):
         target_size = batch["target_size_hw"]
         orig_size = batch["original_size_hw"]
         crop_size = batch["crop_top_lefts"]
-        text_embedding, vector_embedding = self.get_embeddings(batch['captions'], target_size, orig_size, crop_size, batch['negative_captions'] if self.do_classifier_free_guidance else None)
+        text_embedding, vector_embedding = self.get_embeddings_kohya(batch['captions'], target_size, orig_size, crop_size, batch['negative_captions'] if self.do_classifier_free_guidance else None)
         text_embedding = text_embedding.to(self.weight_dtype)
         vector_embedding = vector_embedding.to(self.weight_dtype)
 
@@ -249,14 +249,45 @@ class SDXLTrainer(SD15Trainer):
     #         )
     #     return text_embeddings1, text_embeddings2, text_pool2, uncond_embeddings1, uncond_embeddings2, uncond_pool2
 
-    def get_embeddings(self, captions, target_size, orig_size, crop_size, negative_captions=None):
-        text_embeddings1, text_embeddings2, pool2 = self.encode_caption(captions, negative_captions)
-        size_embeddings = sdxl_train_utils.get_size_embeddings(orig_size, crop_size, target_size, self.device)
+    def get_embeddings_kohya(self, captions, target_size, orig_size, crop_size, negative_captions=None):
+        r"""
+        Get Kohya style embeddings.
+        """
+        text_embeddings1, text_embeddings2, pool2 = self.encode_caption_kohya(captions, negative_captions)
+        size_embeddings = sdxl_train_utils.get_size_embeddings_kohya(orig_size, crop_size, target_size, self.device)
         text_embedding = torch.cat([text_embeddings1, text_embeddings2], dim=2)
         vector_embedding = torch.cat([pool2, size_embeddings], dim=1)
+        if self.condition_dropout_prob:
+            text_embedding = self.dropout_condition(text_embedding)
         return text_embedding, vector_embedding
 
-    def encode_caption(self, captions, negative_captions=None):
+    def get_embeddings_diffusers(self, captions, target_size, orig_size, crop_top_lefts, negative_captions=None):
+        r"""
+        Get Diffusers style embeddings.
+        """
+        prompt_embeds, pooled_prompt_embeds = sdxl_train_utils.encode_prompt_diffusers(
+            captions,
+            [self.text_encoder1, self.text_encoder2],
+            [self.tokenizer1, self.tokenizer2],
+            proportion_empty_prompts=0,
+            is_train=True,
+        )
+        add_text_embeds = pooled_prompt_embeds
+
+        if self.condition_dropout_prob:
+            prompt_embeds = self.dropout_condition(prompt_embeds)
+
+        # Adapted from pipeline.StableDiffusionXLPipeline._get_add_time_ids
+
+        prompt_embeds = prompt_embeds.to(self.device)
+        add_text_embeds = add_text_embeds.to(self.device)
+        add_time_ids = torch.cat([orig_size, crop_top_lefts, target_size], dim=1).to(self.device)
+        # self.logger.info(f"add_time_ids: {add_time_ids}, shape: {add_time_ids.shape}")
+        unet_added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+
+        return prompt_embeds, unet_added_cond_kwargs
+
+    def encode_caption_kohya(self, captions, negative_captions=None):
         input_ids1 = torch.stack([sd15_train_utils.get_input_ids(caption, self.tokenizer1, max_token_length=self.max_token_length) for caption in captions], dim=0)
         input_ids2 = torch.stack([sd15_train_utils.get_input_ids(caption, self.tokenizer2, max_token_length=self.max_token_length) for caption in captions], dim=0)
         with torch.set_grad_enabled(self.train_text_encoder):

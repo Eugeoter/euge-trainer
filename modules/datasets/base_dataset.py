@@ -19,6 +19,8 @@ def default_dataset_hook_saver(dataset_hook, path):
     Default dataset_hook_saver for BaseDataset.
     """
     import json
+    if dataset_hook is None:
+        return
     with open(path, 'w') as f:
         json.dump(dataset_hook, f, indent=4)
 

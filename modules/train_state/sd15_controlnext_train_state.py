@@ -7,7 +7,7 @@ from .sd15_train_state import SD15TrainState
 from ..utils import eval_utils
 
 
-class ControlNeXtTrainState(SD15TrainState):
+class SD15ControlNeXtTrainState(SD15TrainState):
     save_full_model: bool = False
     nnet_trainable_params: List[Union[str, re.Pattern]] = None
 
@@ -41,7 +41,7 @@ class ControlNeXtTrainState(SD15TrainState):
             self.logger.print(f"controlnext nnet model saved to: `{logging.yellow(save_path)}`")
             return save_path
 
-    def get_pipeline_psi(self):
+    def get_pipeline(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=self.unwrap_model(self.text_encoder),

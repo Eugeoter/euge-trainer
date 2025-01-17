@@ -2,6 +2,7 @@ import os
 import random
 import numpy as np
 import torch
+from PIL import Image
 from diffusers import DiffusionPipeline
 from waifuset import logging
 from .base_train_state import BaseTrainState
@@ -106,7 +107,7 @@ class SD15TrainState(BaseTrainState):
             **sampler_kwargs,
         )
 
-    def get_pipeline_psi(self) -> DiffusionPipeline:
+    def get_pipeline(self) -> DiffusionPipeline:
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=self.unwrap_model(self.text_encoder),
@@ -128,7 +129,7 @@ class SD15TrainState(BaseTrainState):
         if self.accelerator.is_main_process:
             try:
                 sample_dir = os.path.join(self.output_dir, self.output_subdir.samples, f"ep{self.epoch}_step{self.global_step}")
-                pipeline = self.get_pipeline_psi()
+                pipeline = self.get_pipeline()
                 # pipeline.set_use_memory_efficient_attention_xformers(self.use_xformers)
                 self.sample_images(pipeline, sample_dir, benchmark, on_epoch_end=on_epoch_end)
                 self.logger.info(f"Sampled images saved to: `{logging.yellow(sample_dir)}`")
@@ -162,7 +163,7 @@ class SD15TrainState(BaseTrainState):
         return 42
 
     def get_benchmark(self):
-        is_controlnet = 'controlnet' in self.train_dataset.__class__.__name__.lower()
+        require_image_condition = 'imagecondition' in self.train_dataset.__class__.__name__.lower()
         if self.eval_benchmark is not None:
             return self.eval_benchmark
         else:
@@ -181,9 +182,10 @@ class SD15TrainState(BaseTrainState):
                     width=bucket_size[0],
                     height=bucket_size[1],
                     sample_name=f"train_{img_md['image_key']}",
+                    target_image=Image.fromarray(self.train_dataset.get_bucket_image(img_md)),  # PIL
                 )
-                if is_controlnet:
-                    sample['control_image'] = self.train_dataset.get_control_image(img_md, type='pil')
+                if require_image_condition:
+                    sample['condition_image'] = self.train_dataset.get_condition_image(img_md, type='pil')
                 samples.append(sample)
 
             if self.valid_dataset is not None:
@@ -200,9 +202,10 @@ class SD15TrainState(BaseTrainState):
                         width=bucket_size[0],
                         height=bucket_size[1],
                         sample_name=f"valid_{img_md['image_key']}",
+                        target_image=Image.fromarray(self.valid_dataset.get_bucket_image(img_md)),  # PIL
                     )
-                    if is_controlnet:
-                        sample['control_image'] = self.valid_dataset.get_control_image(img_md, type='pil')
+                    if require_image_condition:
+                        sample['condition_image'] = self.valid_dataset.get_condition_image(img_md, type='pil')
                     samples.append(sample)
             return samples
 

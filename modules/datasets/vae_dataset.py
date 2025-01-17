@@ -23,7 +23,7 @@ class VAEDataset(T2IDataset):
         for img_key in batch:
             img_md = self.get_img_md(img_key)
             is_flipped = self.flip_aug and random.random() > 0.5
-            image = self.get_bucket_image(img_md)
+            image = self.get_image_tensor(img_md)
             if image is None:
                 raise FileNotFoundError(f"Image and cache not found for `{img_key}`")
             if is_flipped:

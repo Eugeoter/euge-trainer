@@ -3,6 +3,8 @@ import math
 import os
 import re
 import gc
+import random
+import numpy as np
 from accelerate import init_empty_weights
 from transformers import CLIPTokenizer, CLIPTextModel, CLIPTextModelWithProjection
 from typing import Optional, List, Union
@@ -346,7 +348,7 @@ def get_timestep_embedding(x, outdim):
     return emb
 
 
-def get_size_embeddings(orig_size, crop_size, target_size, device):
+def get_size_embeddings_kohya(orig_size, crop_size, target_size, device):
     emb1 = get_timestep_embedding(orig_size, 256)
     emb2 = get_timestep_embedding(crop_size, 256)
     emb3 = get_timestep_embedding(target_size, 256)
@@ -816,3 +818,43 @@ def get_weighted_text_embeddings(
     if negative_captions is not None:
         return text_embeddings, text_pool, uncond_embeddings, uncond_pool
     return text_embeddings, text_pool, None, None
+
+
+def encode_prompt_diffusers(prompt_batch, text_encoders, tokenizers, proportion_empty_prompts, is_train=True):  # Adapted from pipelines.StableDiffusionXLPipeline.encode_prompt
+    prompt_embeds_list = []
+
+    captions = []
+    for caption in prompt_batch:
+        if random.random() < proportion_empty_prompts:
+            captions.append("")
+        elif isinstance(caption, str):
+            captions.append(caption)
+        elif isinstance(caption, (list, np.ndarray)):
+            # take a random caption if there are multiple
+            captions.append(random.choice(caption) if is_train else caption[0])
+
+    with torch.no_grad():
+        for tokenizer, text_encoder in zip(tokenizers, text_encoders):
+            text_inputs = tokenizer(
+                captions,
+                padding="max_length",
+                max_length=tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            text_input_ids = text_inputs.input_ids
+            prompt_embeds = text_encoder(
+                text_input_ids.to(text_encoder.device),
+                output_hidden_states=True,
+            )
+
+            # We are only ALWAYS interested in the pooled output of the final text encoder
+            pooled_prompt_embeds = prompt_embeds[0]
+            prompt_embeds = prompt_embeds.hidden_states[-2]
+            bs_embed, seq_len, _ = prompt_embeds.shape
+            prompt_embeds = prompt_embeds.view(bs_embed, seq_len, -1)
+            prompt_embeds_list.append(prompt_embeds)
+
+    prompt_embeds = torch.concat(prompt_embeds_list, dim=-1)
+    pooled_prompt_embeds = pooled_prompt_embeds.view(bs_embed, -1)
+    return prompt_embeds, pooled_prompt_embeds

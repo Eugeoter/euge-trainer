@@ -4,17 +4,17 @@ from torch import nn
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.models.controlnet import ControlNetModel
 from .sd15_trainer import SD15Trainer
-from ..train_state.controlnet_train_state import ControlNetTrainState
-from ..datasets.controlnet_dataset import ControlNetDataset
+from ..train_state.sd15_controlnet_train_state import SD15ControlNetTrainState
+from ..datasets.image_condition_dataset import ImageConditionDataset
 from diffusers.pipelines.controlnet.pipeline_controlnet import StableDiffusionControlNetPipeline
 
 
 class SD15ControlNetTrainer(SD15Trainer):
     nnet_param_names = None
-    dataset_class = ControlNetDataset
+    dataset_class = ImageConditionDataset
     nnet_class = UNet2DConditionModel
     pipeline_class = StableDiffusionControlNetPipeline
-    train_state_class = ControlNetTrainState
+    train_state_class = SD15ControlNetTrainState
     controlnet_class = ControlNetModel
     controlnet_model_name_or_path: str = None
 
@@ -109,18 +109,18 @@ class SD15ControlNetTrainer(SD15Trainer):
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
         latents *= self.vae_scale_factor
 
-        encoder_hidden_states = self.encode_caption(batch['captions'])
+        encoder_hidden_states = self.encode_caption_kohya(batch['captions'])
 
         noise = self.get_noise(latents)
         timesteps = self.get_timesteps(latents)
         noisy_latents = self.get_noisy_latents(latents, noise, timesteps).to(latents.dtype)
 
-        control_images = batch['control_images'].to(self.device, dtype=torch.float32)
+        condition_images = batch['condition_images'].to(self.device, dtype=torch.float32)
         down_block_res_samples, mid_block_res_sample = self.controlnet(
             noisy_latents,
             timesteps,
             encoder_hidden_states=encoder_hidden_states,
-            controlnet_cond=control_images,
+            controlnet_cond=condition_images,
             return_dict=False,
         )
 

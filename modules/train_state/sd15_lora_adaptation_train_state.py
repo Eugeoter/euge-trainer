@@ -53,7 +53,7 @@ class SD15LoRAAdaptationTrainState(SD15TrainState):
 
         return save_path
 
-    def get_pipeline_psi(self):
+    def get_pipeline(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet_psi),
             text_encoder=self.unwrap_model(self.text_encoder_psi),
@@ -125,7 +125,7 @@ class SD15LoRAAdaptationTrainState(SD15TrainState):
                     device_utils.clean_memory()
 
                 sample_dir = os.path.join(self.output_dir, self.output_subdir.samples, f"ep{self.epoch}_step{self.global_step}")
-                pipeline = self.get_pipeline_psi()
+                pipeline = self.get_pipeline()
                 self.sample_images(pipeline, sample_dir, benchmark, on_epoch_end=on_epoch_end)
                 self.logger.info(f"sampled images saved to: `{logging.yellow(sample_dir)}`")
             except Exception as e:

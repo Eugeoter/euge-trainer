@@ -48,8 +48,8 @@ class DistillTrainer(SD15Trainer):
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
         latents *= self.vae_scale_factor
 
-        student_encoder_hidden_states = self.encode_caption(batch['captions'])
-        teacher_encoder_hidden_states = self.encode_caption(batch['teacher_captions'])
+        student_encoder_hidden_states = self.encode_caption_kohya(batch['captions'])
+        teacher_encoder_hidden_states = self.encode_caption_kohya(batch['teacher_captions'])
 
         noise = self.get_noise(latents)
         timesteps = self.get_timesteps(latents)

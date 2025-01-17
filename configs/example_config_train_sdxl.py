@@ -28,7 +28,7 @@ def get_config():
             read_attrs=True,
         ),
     ]
-    config.output_dir = 'projects/example_project'
+    config.output_dir = 'projects/example_train_sdxl'
     config.resume_from = None
 
     # config.dataset_full_cache_path = os.path.join(config.output_dir, 'dataset_full_cache.pkl')

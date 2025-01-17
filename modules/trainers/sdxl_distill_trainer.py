@@ -72,7 +72,7 @@ class SDXLDistillTrainer(SDXLTrainer, DistillTrainer):
         target_size = batch["target_size_hw"]
         orig_size = batch["original_size_hw"]
         crop_size = batch["crop_top_lefts"]
-        student_text_embedding, student_vector_embedding = self.get_embeddings(
+        student_text_embedding, student_vector_embedding = self.get_embeddings_kohya(
             batch['captions'],
             target_size,
             orig_size,
@@ -109,7 +109,7 @@ class SDXLDistillTrainer(SDXLTrainer, DistillTrainer):
 
     def get_teacher_embeddings(self, captions, target_size, orig_size, crop_size, negative_captions=None):
         text_embeddings1, text_embeddings2, text_pool2, uncond_embeddings1, uncond_embeddings2, uncond_pool2 = self.encode_teacher_caption(captions, negative_captions)
-        size_embeddings = sdxl_train_utils.get_size_embeddings(orig_size, crop_size, target_size, self.device)
+        size_embeddings = sdxl_train_utils.get_size_embeddings_kohya(orig_size, crop_size, target_size, self.device)
 
         if self.do_classifier_free_guidance:
             text_embeddings = torch.cat([text_embeddings1, text_embeddings2], dim=2)

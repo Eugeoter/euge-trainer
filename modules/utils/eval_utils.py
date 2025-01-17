@@ -1,6 +1,8 @@
 import torch
 import os
+import inspect
 import wandb
+import numpy as np
 from PIL import Image
 from pathlib import Path
 from waifuset import logging
@@ -90,7 +92,7 @@ def get_sampler(sample_sampler, **sampler_kwargs):
 
     # clip_sample=Trueにする
     if hasattr(scheduler.config, "clip_sample") and scheduler.config.clip_sample is False:
-        # logger.print("set clip_sample to True")
+        # logger.info("set clip_sample to True")
         scheduler.config.clip_sample = True
 
     return scheduler
@@ -120,10 +122,10 @@ def load_params_from_dicts(dicts):
         p = {}
         if (prompt := dic.get("prompt", dic.get('caption', dic.get('tags')))) is not None:
             p["prompt"] = prompt
-        if (control_image := dic.get("control_image")) is not None:
-            p["control_image"] = control_image
-        elif (control_image_path := dic.get("control_image_path")) is not None:
-            p["control_image_path"] = control_image_path
+        if (condition_image := dic.get("condition_image")) is not None:
+            p["condition_image"] = condition_image
+        elif (condition_image_path := dic.get("condition_image_path")) is not None:
+            p["condition_image_path"] = condition_image_path
         if (control_scale := dic.get("control_scale")) is not None:
             p["control_scale"] = control_scale
         if (sample_name := dic.get("sample_name")) is not None:
@@ -145,9 +147,11 @@ GEN_PARAMS = [
     # "original_width",
     # "original_height",
     # "original_scale_factor",
-    "control_image",
-    "control_image_path",
-    "control_scale",
+    "target_image",
+    "target_image_path",
+    "condition_image",
+    "condition_image_path",
+    "control_scale",  # for ControlNeXt
     "save_latents",
 ]
 
@@ -164,30 +168,39 @@ def patch_default_param(param, default_params):
 
 
 def prepare_param(param):
+    prompt = param.get('prompt', param.get('caption', param.get('tags')))
+    if prompt is None:
+        prompt = ""
+        logger.warning(f"Prompt not found, set to empty string")
+
     height = param["height"]
     width = param["width"]
     height = max(64, height - height % 32)
     width = max(64, width - width % 32)
 
-    if (control_image := param.get('control_image')) is not None:
+    if (condition_image := param.get('condition_image')) is not None:
         import io
-        if isinstance(control_image, Image.Image):
+        if isinstance(condition_image, Image.Image):
             pass
-        elif isinstance(control_image, dict):
-            if (control_image_bytes := control_image.get('bytes')) is not None:
-                control_image = Image.open(io.BytesIO(control_image_bytes))
-            elif (control_image_path := control_image.get('path')) is not None:
-                control_image = Image.open(control_image_path)
+        elif isinstance(condition_image, dict):
+            if (condition_image_bytes := condition_image.get('bytes')) is not None:
+                condition_image = Image.open(io.BytesIO(condition_image_bytes))
+            elif (condition_image_path := condition_image.get('path')) is not None:
+                condition_image = Image.open(condition_image_path)
             else:
-                raise ValueError(f"control image not found")
-    elif (control_image_path := param.get('control_image_path')) is not None:
-        control_image = Image.open(control_image_path).convert('RGB')
+                raise ValueError(f"condition image not found")
+    elif (condition_image_path := param.get('condition_image_path')) is not None:
+        condition_image = Image.open(condition_image_path).convert('RGB')
     else:
-        control_image = None
+        condition_image = None
+
+    param["prompt"] = prompt
     param["height"] = height
     param["width"] = width
     param["generator"] = torch.Generator().manual_seed(param["seed"])
-    param["control_image"] = control_image
+    param["condition_image"] = condition_image
+    param["target_image"] = param.get("target_image")
+
     return param
 
 
@@ -224,7 +237,7 @@ def sample_during_train(
     device,
     wandb_run=None,
 ):
-    logger.print(f"\ngenerating sample images at step: {steps}")
+    logger.info(f"\ngenerating sample images at step: {steps}")
 
     device_utils.clean_memory_on_device(device)
     use_tmp_vae_device = False
@@ -237,10 +250,11 @@ def sample_during_train(
     if isinstance(benchmark, (str, Path)):
         gen_params = load_params_from_file(benchmark)
     elif isinstance(benchmark, list) and all(isinstance(d, dict) for d in benchmark):
-        gen_params = load_params_from_dicts(benchmark)
+        gen_params = benchmark
     else:
         raise ValueError("benchmark should be a path to a file or a list of dictionaries")
     pipeline.to(device)
+    acceptable_param_names = inspect.signature(pipeline.__call__).parameters.keys()
 
     # sample_dir = os.path.join(config.output_dir, config.output_subdir.samples, f"epoch_{epoch}" if epoch is not None else f"step_{steps}")
     os.makedirs(sample_dir, exist_ok=True)
@@ -256,21 +270,28 @@ def sample_during_train(
             sample_name = param.pop("sample_name", DEFAULT_SAMPLE_NAME)
 
             param = patch_default_param(param, default_params)
-
             param = prepare_param(param)
-            is_controlnet = (control_image := param.get("control_image")) is not None
+            target_image = param.get("target_image")
+            condition_image = param.get("condition_image")
 
-            logger.print(f"sample_{i}:")
-            logger.print(f"  sample_name: {sample_name}", no_prefix=True)
-            logger.print(f"  prompt: {param['prompt']}", no_prefix=True)
-            logger.print(f"  negative_prompt: {param['negative_prompt']}", no_prefix=True)
-            logger.print(f"  seed: {param['seed']}", no_prefix=True)
-            if is_controlnet:
-                logger.print(f"  use controlnet condition", no_prefix=True)
-                if 'control_scale' in param:
-                    logger.print(f"  control_scale: {param['control_scale']}", no_prefix=True)
-                else:
-                    logger.print(f"  control_scale: 1.0 (default)", no_prefix=True)
+            has_image_condition = condition_image is not None
+            has_target_image = target_image is not None
+            logger.debug(f"is_condition: {has_image_condition}")
+
+            logger.info(f"sample_{i}:")
+            logger.info(f"  sample_name: {sample_name}", no_prefix=True)
+            logger.info(f"  prompt: {param['prompt']}", no_prefix=True)
+            logger.info(f"  negative_prompt: {param['negative_prompt']}", no_prefix=True)
+            logger.info(f"  seed: {param['seed']}", no_prefix=True)
+
+            if has_image_condition:
+                logger.info(f"  image condition provided", no_prefix=True)
+
+                if 'control_scale' in acceptable_param_names:  # for ControlNeXt
+                    if 'control_scale' in param:
+                        logger.info(f"  control_scale: {param['control_scale']}", no_prefix=True)
+                    else:
+                        logger.info(f"  control_scale: 1.0 (default)", no_prefix=True)
 
             # logger.debug(f"default_params: {default_params}")
             # logger.debug(f"param: {param}")
@@ -297,22 +318,32 @@ def sample_during_train(
                     num_images_per_prompt=param["batch_count"],
                     # callback_on_step_end_tensor_inputs=save_latents_callback if param["save_latents"] else None,
                 )
-                if is_controlnet:
-                    import inspect
-                    gen_param_names = inspect.signature(pipeline.__call__).parameters.keys()
-                    if "controlnet_image" in gen_param_names:
-                        pipeline_input["controlnet_image"] = control_image
-                    elif "image" in gen_param_names:
-                        pipeline_input["image"] = control_image
+                if has_image_condition:
+                    if "image" in acceptable_param_names:
+                        if 'mask_image' in acceptable_param_names:  # for inpainting pipeline
+                            assert isinstance(target_image, (Image.Image, np.ndarray, torch.Tensor)), f"target_image should be Image.Image, np.ndarray or torch.Tensor, but got {type(target_image)}"
+                            pipeline_input["image"] = target_image
+                            pipeline_input["mask_image"] = condition_image
+                            logger.info(f"  inpainting condition provided", no_prefix=True)
+                        else:
+                            pipeline_input["image"] = condition_image
+                            logger.info(f"  image condition provided", no_prefix=True)
+                    elif "controlnet_image" in acceptable_param_names:
+                        pipeline_input["controlnet_image"] = condition_image
+                        logger.info(f"  controlnet condition provided", no_prefix=True)
                     else:
-                        logger.warning(f"control_image is provided but not used in the pipeline")
-                    if 'controlnet_scale' in gen_param_names and 'control_scale' in param:
+                        logger.warning(f"condition_image is provided but not used in the pipeline")
+                    if 'controlnet_scale' in acceptable_param_names and 'control_scale' in param:
                         pipeline_input['controlnet_scale'] = param["control_scale"]
-                    pipeline_input['width'] = control_image.width // 8 * 8
-                    pipeline_input['height'] = control_image.height // 8 * 8
+                    pipeline_input['width'] = condition_image.width // 8 * 8
+                    pipeline_input['height'] = condition_image.height // 8 * 8
                 else:
-                    if 'control' in pipeline.__class__.__name__.lower():
-                        logger.warning(f"Pipeline {pipeline.__class__.__name__} looks like a controlnet-related pipeline but control condition is not provided")
+                    if 'controlnet' in pipeline.__class__.__name__.lower():
+                        logger.warning(f"Pipeline {pipeline.__class__.__name__} looks like a controlnet-related pipeline but condition condition is not provided")
+                    if 'controlnext' in pipeline.__class__.__name__.lower():
+                        logger.warning(f"Pipeline {pipeline.__class__.__name__} looks like a controlnext-related pipeline but condition condition is not provided")
+                    if 'inpaint' in pipeline.__class__.__name__.lower():
+                        logger.warning(f"Pipeline {pipeline.__class__.__name__} looks like a inpainting-related pipeline but condition condition is not provided")
 
                 output = pipeline(**pipeline_input)
 
@@ -321,10 +352,10 @@ def sample_during_train(
                 images = pipeline.latents_to_image(output)
             else:
                 images = output.images
-            if is_controlnet:
-                control_image: Image.Image = control_image
-                control_image = control_image.convert('RGB')
-                control_image = dataset_utils.resize_if_needed(control_image, (pipeline_input["width"], pipeline_input["height"]))
+            if has_image_condition:
+                condition_image: Image.Image = condition_image
+                condition_image = condition_image.convert('RGB')
+                condition_image = dataset_utils.resize_if_needed(condition_image, (pipeline_input["width"], pipeline_input["height"]))
                 images_overlaid = []
             for j, image in enumerate(images):
                 # ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
@@ -333,29 +364,33 @@ def sample_during_train(
                 image.save(os.path.join(sample_dir, img_filename))
                 if wandb_run is not None:
                     wandb_run.log({img_filename: wandb.Image(image)}, step=steps)
-                if is_controlnet:
-                    control_image.save(os.path.join(sample_dir, f"{sample_name}_control-{num_suffix}-{i}-{j}.png"))
+                if has_image_condition:
+                    condition_image.save(os.path.join(sample_dir, f"{sample_name}_condition-{num_suffix}-{i}-{j}.png"))
                     if wandb_run is not None:
-                        wandb_run.log({f"control_image-{num_suffix}-{i}-{j}.png": wandb.Image(control_image)}, step=steps)
+                        wandb_run.log({f"condition_image-{num_suffix}-{i}-{j}.png": wandb.Image(condition_image)}, step=steps)
 
-                    image_overlaid = overlaid_image(image, control_image)
+                    image_overlaid = overlaid_image(image, condition_image)
                     overlaid_filename = f"{sample_name}_overlaid-{num_suffix}-{i}-{j}.png"
                     image_overlaid.save(os.path.join(sample_dir, overlaid_filename))
                     if wandb_run is not None:
                         wandb_run.log({overlaid_filename: wandb.Image(image_overlaid)}, step=steps)
                     images_overlaid.append(image_overlaid)
+                if has_target_image:
+                    target_image.save(os.path.join(sample_dir, f"{sample_name}_target-{num_suffix}-{i}-{j}.png"))
+                    if wandb_run is not None:
+                        wandb_run.log({f"target_image-{num_suffix}-{i}-{j}.png": wandb.Image(target_image)}, step=steps)
 
             if len(images) > 1:
-                if is_controlnet:
-                    images_grid = concat_images([control_image] + images)
+                if has_image_condition:
+                    images_grid = concat_images([condition_image] + images)
                 else:
                     images_grid = concat_images(images)
                 grid_filename = f"{sample_name}_grid-{num_suffix}-{i}.png"
                 images_grid.save(os.path.join(sample_dir, grid_filename))
                 if wandb_run is not None:
                     wandb_run.log({grid_filename: wandb.Image(images_grid)}, step=steps)
-                if is_controlnet:
-                    images_overlaid_grid = concat_images([control_image] + images_overlaid)
+                if has_image_condition:
+                    images_overlaid_grid = concat_images([condition_image] + images_overlaid)
                     overlaid_grid_filename = f"{sample_name}_overlaid_grid-{num_suffix}-{i}.png"
                     images_overlaid_grid.save(os.path.join(sample_dir, overlaid_grid_filename))
                     if wandb_run is not None:

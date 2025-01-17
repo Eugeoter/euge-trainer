@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 from .sd15_trainer import SD15Trainer
-from ..train_state.controlnext_train_state import ControlNeXtTrainState
-from ..datasets.controlnet_dataset import ControlNetDataset
+from ..train_state.sd15_controlnext_train_state import SD15ControlNeXtTrainState
+from ..datasets.image_condition_dataset import ImageConditionDataset
 from ..models.sd15.controlnext_nnet import ControlNeXtUNet2DConditionModel
 from ..models.sd15.controlnext import ControlNeXtModel
 from ..pipelines.controlnext_pipeline import StableDiffusionControlNeXtPipeline
@@ -10,10 +10,10 @@ from ..pipelines.controlnext_pipeline import StableDiffusionControlNeXtPipeline
 
 class SD15ControlNeXtTrainer(SD15Trainer):
     nnet_param_names = None
-    dataset_class = ControlNetDataset
+    dataset_class = ImageConditionDataset
     nnet_class = ControlNeXtUNet2DConditionModel
     pipeline_class = StableDiffusionControlNeXtPipeline
-    train_state_class = ControlNeXtTrainState
+    train_state_class = SD15ControlNeXtTrainState
 
     controlnext_class = ControlNeXtModel
     controlnext_model_name_or_path: str = None
@@ -108,14 +108,14 @@ class SD15ControlNeXtTrainer(SD15Trainer):
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
         latents *= self.vae_scale_factor
 
-        encoder_hidden_states = self.encode_caption(batch['captions'])
+        encoder_hidden_states = self.encode_caption_kohya(batch['captions'])
 
         noise = self.get_noise(latents)
         timesteps = self.get_timesteps(latents)
         noisy_latents = self.get_noisy_latents(latents, noise, timesteps).to(latents.dtype)
 
-        control_images = batch['control_images'].to(self.device, dtype=self.controlnext.dtype)
-        controls = self.controlnext(control_images, timesteps)
+        condition_images = batch['condition_images'].to(self.device, dtype=self.controlnext.dtype)
+        controls = self.controlnext(condition_images, timesteps)
         controls['scale'] = controls['scale'] * self.control_scale
 
         with self.accelerator.autocast():

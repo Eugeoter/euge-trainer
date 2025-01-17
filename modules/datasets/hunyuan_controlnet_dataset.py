@@ -1,6 +1,6 @@
 from .hunyuan_dataset import HunyuanDataset
-from .controlnet_dataset import ControlNetDataset
+from .image_condition_dataset import ImageConditionDataset
 
 
-class HunyuanControlNetDataset(HunyuanDataset, ControlNetDataset):
+class HunyuanControlNetDataset(HunyuanDataset, ImageConditionDataset):
     pass

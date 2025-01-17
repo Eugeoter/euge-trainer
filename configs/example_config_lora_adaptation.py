@@ -1,5 +1,5 @@
 from ml_collections import ConfigDict
-from tools.control import *
+from tools.condition import *
 from tools.dataset.coco import get_coco2017_caption
 
 
@@ -19,15 +19,17 @@ def get_config():
         'tau_psi': 'ghibli style',
     }
 
-    config.backbone_type = 'sd15'
     config.init_w0 = 1.0
     config.init_w1 = 1.0
     config.lora_strength = 1.0
-    config.lambda_lpips = 0
+    config.lambda_lpips = 0.0
     config.lr_w0 = 1e-4
     config.lr_w1 = 5e-3
     config.loss_beta_1 = 0.5
     config.loss_beta_2 = 0.5
+    config.lora_adapter_type = 'layerwise'  # or 'elementwise
+
+    config.use_gan = False
 
     config.use_wandb = True
 
@@ -153,13 +155,13 @@ def get_config():
     config.learning_rate_te = 0
     config.gradient_checkpointing = False
     config.gradient_accumulation_steps = 1
-    config.optimizer_type = 'Adafactor'
+    config.optimizer_type = 'AdamW'
     config.optimizer_kwargs = cfg(
-        relative_step=False,
-        scale_parameter=False,
-        warmup_init=False,
-        # weight_decay=0.03,
-        # betas=(0.9, 0.9),
+        # relative_step=False,
+        # scale_parameter=False,
+        # warmup_init=False,
+        weight_decay=0.01,
+        betas=(0.9, 0.95),
         # amsgrad=False
     )
     config.cpu = False

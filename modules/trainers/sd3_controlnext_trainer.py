@@ -1,7 +1,7 @@
 import torch
 from .sd3_trainer import SD3Trainer
 from .sd15_controlnext_trainer import SD15ControlNeXtTrainer
-from ..datasets.controlnet_dataset import ControlNetDataset
+from ..datasets.image_condition_dataset import ImageConditionDataset
 from ..models.sd3.controlnext import SD3ControlNeXtModel
 from ..models.sd3.controlnext_nnet import SD3ControlAnyTransformer2DModel
 from ..train_state.sd3_controlnext_train_state import SD3ControlNeXtTrainState
@@ -9,7 +9,7 @@ from ..pipelines.sd3_controlnext_pipeline import StableDiffusion3ControlNeXtPipe
 
 
 class SD3ControlAnyTrainer(SD3Trainer, SD15ControlNeXtTrainer):
-    dataset_class = ControlNetDataset
+    dataset_class = ImageConditionDataset
     train_state_class = SD3ControlNeXtTrainState
     nnet_class = SD3ControlAnyTransformer2DModel
     pipeline_class = StableDiffusion3ControlNeXtPipeline

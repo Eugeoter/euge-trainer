@@ -1,12 +1,9 @@
-from .sd15_controlnet_train_state import SD15ControlNetTrainState
 from .sdxl_train_state import SDXLTrainState
+from .sd15_inpainting_train_state import SD15InpaintingTrainState
 from ..utils import eval_utils
 
 
-class SDXLControlNetTrainState(SD15ControlNetTrainState, SDXLTrainState):
-    def save_diffusion_model(self):
-        return None
-
+class SDXLInpaintingTrainState(SDXLTrainState, SD15InpaintingTrainState):
     def get_pipeline(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
@@ -15,7 +12,6 @@ class SDXLControlNetTrainState(SD15ControlNetTrainState, SDXLTrainState):
             text_encoder_2=self.unwrap_model(self.text_encoder2),
             tokenizer_2=self.tokenizer2,
             vae=self.unwrap_model(self.vae),
-            controlnet=self.unwrap_model(self.controlnet),
             scheduler=eval_utils.get_sampler(self.eval_sampler),
             feature_extractor=None,
         )

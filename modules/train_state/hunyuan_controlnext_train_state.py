@@ -1,14 +1,14 @@
 from .hunyuan_train_state import HunyuanTrainState
-from .controlnext_train_state import ControlNeXtTrainState
+from .sd15_controlnext_train_state import SD15ControlNeXtTrainState
 from ..utils import hunyuan_model_utils
 
 
-class HunyuanControlNeXtTrainState(HunyuanTrainState, ControlNeXtTrainState):
+class HunyuanControlNeXtTrainState(HunyuanTrainState, SD15ControlNeXtTrainState):
 
     def save_diffusion_model(self):
-        return ControlNeXtTrainState.save_diffusion_model(self)
+        return SD15ControlNeXtTrainState.save_diffusion_model(self)
 
-    def get_pipeline_psi(self):
+    def get_pipeline(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=self.unwrap_model(self.text_encoder[0]),

@@ -1,10 +1,10 @@
-from .controlnext_train_state import ControlNeXtTrainState
+from .sd15_controlnext_train_state import SD15ControlNeXtTrainState
 from .sdxl_train_state import SDXLTrainState
 from ..utils import eval_utils
 
 
-class SDXLControlNeXtTrainState(ControlNeXtTrainState, SDXLTrainState):
-    def get_pipeline_psi(self):
+class SDXLControlNeXtTrainState(SD15ControlNeXtTrainState, SDXLTrainState):
+    def get_pipeline(self):
         return self.pipeline_class(
             unet=self.unwrap_model(self.nnet),
             text_encoder=[self.unwrap_model(self.text_encoder1), self.unwrap_model(self.text_encoder2)],

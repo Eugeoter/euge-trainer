@@ -1,12 +1,12 @@
 from .flux_train_state import FluxTrainState
-from .controlnext_train_state import ControlNeXtTrainState
+from .sd15_controlnext_train_state import SD15ControlNeXtTrainState
 
 
-class FluxControlNeXtTrainState(FluxTrainState, ControlNeXtTrainState):
+class FluxControlNeXtTrainState(FluxTrainState, SD15ControlNeXtTrainState):
     def save_diffusion_model(self):
-        return ControlNeXtTrainState.save_diffusion_model(self)
+        return SD15ControlNeXtTrainState.save_diffusion_model(self)
 
-    def get_pipeline_psi(self):
+    def get_pipeline(self):
         return self.pipeline_class(
             transformer=self.unwrap_model(self.nnet),
             vae=self.unwrap_model(self.vae),

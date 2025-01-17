@@ -88,7 +88,7 @@ class SD15Trainer(BaseTrainer):
     do_classifier_free_guidance: bool = False
     caption_weighting: bool = False
     max_embeddings_multiples: int = 3
-    condition_dropout_rate: float = 0.01
+    condition_dropout_prob: float = 0.0
 
     dataset_class = T2IDataset
     train_dataset: dataset_class
@@ -331,7 +331,7 @@ class SD15Trainer(BaseTrainer):
                 self.nnet.enable_gradient_checkpointing()
             training_models.append(self.nnet)
             if self.nnet_trainable_params:  # only train specific parameters
-                self.logger.info(f"filtering trainable parameters of nnet by patterns: {self.nnet_trainable_params}")
+                self.logger.info(f"Filtering trainable parameters of nnet by patterns: {self.nnet_trainable_params}")
                 if isinstance(self.nnet_trainable_params, (str, re.Pattern)):
                     self.nnet_trainable_params = [self.nnet_trainable_params]
                 self.nnet_trainable_params = [re.compile(p) for p in self.nnet_trainable_params]
@@ -345,11 +345,11 @@ class SD15Trainer(BaseTrainer):
                         params.requires_grad = False
                 params_to_optimize.append({"params": nnet_params, "lr": learning_rate_nnet})
             elif self.block_lrs is not None:
-                self.logger.info(f"applying block learning rates to nnet: {self.block_lrs}")
+                self.logger.info(f"Applying block learning rates to nnet: {self.block_lrs}")
                 self.nnet.requires_grad_(True)
                 params_to_optimize = self.setup_block_lrs()
             else:
-                self.logger.info(f"training all parameters of nnet")
+                self.logger.info(f"Training all parameters of nnet")
                 self.nnet.requires_grad_(True)
                 params_to_optimize.append({"params": list(self.nnet.parameters()), "lr": learning_rate_nnet})
         else:
@@ -707,7 +707,7 @@ class SD15Trainer(BaseTrainer):
         device = conditions['crossattn'].device
         dtype = conditions['crossattn'].dtype
 
-        p = 1.0 - self.condition_dropout_rate
+        p = 1.0 - self.condition_dropout_prob
         batch_mask = torch.bernoulli(p * torch.ones(bs, device=device, dtype=dtype))
 
         for cond_batch in conditions.values():
@@ -722,7 +722,7 @@ class SD15Trainer(BaseTrainer):
             noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
         return noisy_latents
 
-    def encode_caption(self, captions):
+    def encode_caption_kohya(self, captions):
         input_ids = torch.stack([sd15_train_utils.get_input_ids(caption, self.tokenizer, max_token_length=self.max_token_length) for caption in captions], dim=0)
         with torch.set_grad_enabled(self.train_text_encoder):
             input_ids = input_ids.to(self.device)
@@ -730,6 +730,8 @@ class SD15Trainer(BaseTrainer):
                 input_ids, self.tokenizer, self.text_encoder, weight_dtype=None if not self.full_fp16 else self.weight_dtype,
                 v2=self.v2, clip_skip=self.clip_skip, max_token_length=self.max_token_length,
             )
+        if self.condition_dropout_prob:
+            encoder_hidden_states = self.dropout_condition(encoder_hidden_states)
         return encoder_hidden_states
 
     def optimizer_step(self, loss):
@@ -745,7 +747,7 @@ class SD15Trainer(BaseTrainer):
     def zero_grad(self):
         super().zero_grad()
         if self.use_edm2 and self.edm2_optimizer is not self.optimizer:
-            self.edm2_optimizer.zero_grad()
+            self.edm2_optimizer.zero_grad(set_to_none=True)
 
     def train_step(self, batch) -> float:
         if batch.get("latents") is not None:
@@ -755,9 +757,7 @@ class SD15Trainer(BaseTrainer):
                 latents = self.vae.encode(batch["images"].to(self.vae_dtype)).latent_dist.sample().to(self.weight_dtype)
         latents *= self.vae_scale_factor
 
-        encoder_hidden_states = self.encode_caption(batch['captions'])
-        if self.condition_dropout_rate:
-            encoder_hidden_states = self.dropout_condition(encoder_hidden_states)
+        encoder_hidden_states = self.encode_caption_kohya(batch['captions'])
 
         noise = self.get_noise(latents)
         timesteps = self.get_timesteps(latents)
