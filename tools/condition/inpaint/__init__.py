@@ -50,7 +50,7 @@ def get_random_inpaint_mask(
             ),
             variants_n=variants_n
         )
-    src_masks = MASK_GENERATOR.get_masks(img)
+    src_masks = MASK_GENERATOR.get_masks(img.convert('RGB'))
     max_tamper_area = 1
     max_masks_per_image = 100
     filtered_image_mask_pairs = []

@@ -126,6 +126,7 @@ class SD15ControlNeXtTrainer(SD15Trainer):
                 down_block_additional_residuals=None,  # [sample.to(dtype=weight_dtype) for sample in down_block_res_samples],
                 mid_block_additional_residual=None,  # mid_block_res_sample.to(dtype=weight_dtype),
                 controls=controls,
+                controlnet=self.controlnext,
                 return_dict=False,
             )[0]
 

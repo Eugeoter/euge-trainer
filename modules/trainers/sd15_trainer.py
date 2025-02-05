@@ -489,7 +489,7 @@ class SD15Trainer(BaseTrainer):
 
         # Check ztsnr
         if self.zero_terminal_snr:
-            assert noise_scheduler.all_snr[-1] != 0, f"Expected all_snr[-1] to be 0 when zero_terminal_snr is True, but got {noise_scheduler.all_snr[-1]}"
+            assert noise_scheduler.all_snr[-1] == 0, f"Expected all_snr[-1] to be 0 when zero_terminal_snr is True, but got {noise_scheduler.all_snr[-1]}"
 
         return noise_scheduler
 

@@ -8,6 +8,6 @@ LOGGER = logging.get_logger(CONTROL_TYPE)
 
 def get_blur(img, radius=None) -> Image.Image:
     if radius is None:
-        radius = np.random.randint(1, 10)
+        radius = np.random.randint(2, 16)
     img = img.filter(ImageFilter.GaussianBlur(radius=radius))
     return img

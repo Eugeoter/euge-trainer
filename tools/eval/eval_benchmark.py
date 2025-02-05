@@ -25,7 +25,7 @@ def eval_benchmark(
     eval_score_types: List[Literal['fid', 'clip_score', 'ssim', 'phash', 'mse']] = ['fid', 'clip_score'],
     max_gen=float('inf'),
     caption_getter=None,
-    control_image_getter=None,
+    condition_image_getter=None,
     control_scale=1.0,
     clip_batch_size=256,
     phash_hash_size=8,
@@ -58,7 +58,7 @@ def eval_benchmark(
         pipeline_inputs['prompt'] = get_caption(img_md, caption_getter)
 
         if eval_type == 'controllable-generation':
-            control_image = get_control_image(img_md, control_image_getter)
+            control_image = get_control_image(img_md, condition_image_getter)
 
             if 'controlnet_image' in pipeline_params:
                 pipeline_inputs['controlnet_image'] = control_image

@@ -92,7 +92,12 @@ def around_reso(img_w, img_h, reso: Union[Tuple[int, int], int], divisible: Opti
     divisible = divisible or 1
 
     # check if already in the bucket
-    if img_w <= max_width and img_h <= max_height and img_w % divisible == 0 and img_h % divisible == 0 and img_w * img_h <= (max_area := reso[0] * reso[1]):
+    max_area = reso[0] * reso[1]
+    if (
+        (max_width is None or img_w <= max_width) and (max_height is None or img_h <= max_height) and
+        img_w % divisible == 0 and img_h % divisible == 0 and
+        img_w * img_h <= max_area
+    ):
         return (img_w, img_h)
 
     img_ar = img_w / img_h

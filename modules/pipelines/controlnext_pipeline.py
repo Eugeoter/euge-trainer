@@ -182,6 +182,7 @@ class StableDiffusionControlNeXtPipeline(
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
         controlnet: Union[ControlNetModel, List[ControlNetModel], Tuple[ControlNetModel], MultiControlNetModel] = None,
+        controlnet_2: Union[ControlNetModel, List[ControlNetModel], Tuple[ControlNetModel], MultiControlNetModel] = None,
         image_encoder: CLIPVisionModelWithProjection = None,
         requires_safety_checker: bool = True,
     ):
@@ -212,6 +213,7 @@ class StableDiffusionControlNeXtPipeline(
             tokenizer=tokenizer,
             unet=unet,
             controlnet=controlnet,
+            controlnet_2=controlnet_2,
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
@@ -260,7 +262,7 @@ class StableDiffusionControlNeXtPipeline(
         if load_weight_increasement:
             unet_sd = self.unet.state_dict()
             for k in state_dict.keys():
-                state_dict[k] = state_dict[k] + unet_sd[k]
+                state_dict[k] = state_dict[k].to(unet_sd[k]) / 2 + unet_sd[k]
         self.unet.load_state_dict(state_dict, strict=False)
 
     @classmethod
@@ -299,6 +301,32 @@ class StableDiffusionControlNeXtPipeline(
         matched_num_params = sum([state_dict[k].numel() for k in matched_keys])
         print(f"Matched {len(matched_keys)} keys with {matched_num_params} parameters.")
         self.controlnet.load_state_dict(state_dict, strict=False)
+
+    def load_controlnext_controlnet_weights_2(
+        self,
+        pretrained_model_name_or_path_or_dict: Union[str, Dict[str, torch.Tensor]],
+        **kwargs,
+    ):
+        if self.controlnet_2 is None:
+            raise ValueError("No ControlNeXt ControlNet found in the pipeline.")
+        if isinstance(pretrained_model_name_or_path_or_dict, dict):
+            pretrained_model_name_or_path_or_dict = pretrained_model_name_or_path_or_dict.copy()
+
+        state_dict = self.controlnext_controlnet_state_dict(pretrained_model_name_or_path_or_dict, **kwargs)
+
+        print(f"Loading ControlNeXt ControlNet")
+        missing_keys = set(self.controlnet.state_dict().keys()) - set(state_dict.keys())
+        extra_keys = set(state_dict.keys()) - set(self.controlnet.state_dict().keys())
+        if len(missing_keys) > 0:
+            logger.warning(f"Missing keys: {len(missing_keys)}")
+        if len(extra_keys) > 0:
+            logger.warning(f"Extra keys: {len(extra_keys)}")
+        if len(missing_keys) == 0 and len(extra_keys) == 0:
+            print("All keys matched.")
+        matched_keys = set(state_dict.keys()) & set(self.controlnet.state_dict().keys())
+        matched_num_params = sum([state_dict[k].numel() for k in matched_keys])
+        print(f"Matched {len(matched_keys)} keys with {matched_num_params} parameters.")
+        self.controlnet_2.load_state_dict(state_dict, strict=False)
 
     @classmethod
     @validate_hf_hub_args
@@ -1029,6 +1057,7 @@ class StableDiffusionControlNeXtPipeline(
         self,
         prompt: Union[str, List[str]] = None,
         controlnet_image: PipelineImageInput = None,
+        controlnet_image_2: PipelineImageInput = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
@@ -1264,6 +1293,17 @@ class StableDiffusionControlNeXtPipeline(
                 do_classifier_free_guidance=self.do_classifier_free_guidance,
                 guess_mode=guess_mode,
             )
+            controlnet_image_2 = self.prepare_image(
+                image=controlnet_image_2,
+                width=width,
+                height=height,
+                batch_size=batch_size * num_images_per_prompt,
+                num_images_per_prompt=num_images_per_prompt,
+                device=device,
+                dtype=controlnet.dtype,
+                do_classifier_free_guidance=self.do_classifier_free_guidance,
+                guess_mode=guess_mode,
+            )
             height, width = controlnet_image.shape[-2:]
         elif isinstance(controlnet, MultiControlNetModel):
             images = []
@@ -1353,6 +1393,14 @@ class StableDiffusionControlNeXtPipeline(
                     controls['scale'] *= controlnet_scale
                     unet_additional_kwargs["controls"] = controls
 
+                if controlnet_image_2 is not None and self.controlnet_2 is not None:
+                    controls_2 = self.controlnet_2(
+                        controlnet_image_2,
+                        t,
+                    )
+                    controls_2['scale'] *= controlnet_scale
+                    unet_additional_kwargs["controls_2"] = controls_2
+
                 # predict the noise residual
                 noise_pred = self.unet(
                     latent_model_input,
@@ -1363,6 +1411,7 @@ class StableDiffusionControlNeXtPipeline(
                     down_block_additional_residuals=None,  # down_block_res_samples,
                     mid_block_additional_residual=None,  # mid_block_res_sample,
                     added_cond_kwargs=added_cond_kwargs,
+                    controlnet=self.controlnet,
                     return_dict=False,
                     **unet_additional_kwargs,
                 )[0]

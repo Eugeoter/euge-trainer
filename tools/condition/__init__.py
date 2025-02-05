@@ -346,6 +346,7 @@ def get_random_inpainting_masked_image_condition(
         segm_proba=segm_proba,
         variants_n=variants_n,
     )
-    masked_image = np.array(image)
-    masked_image[mask] = 0
-    return masked_image
+    mask = mask.resize(image.size, Image.BILINEAR)
+    mask = Image.eval(mask, lambda a: 255 - a)
+    masked_image = Image.composite(image, Image.new('RGB', image.size, (0, 0, 0)), mask)
+    return np.array(masked_image)

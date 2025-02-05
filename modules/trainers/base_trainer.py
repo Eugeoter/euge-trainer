@@ -909,12 +909,19 @@ class BaseTrainer(class_utils.FromConfigMixin):
                 self.loss_recorder.add(loss=step_loss)
                 avr_loss: float = self.loss_recorder.moving_average(window=self.loss_recorder_kwargs.stride)
                 ema_loss: float = self.loss_recorder.ema
-                self.accelerator_logs.update({"loss/step": step_loss, 'loss_avr/step': avr_loss, 'loss_ema/step': ema_loss})
+                lr: float = self.lr_scheduler.get_last_lr()[0]
+
+                self.accelerator_logs.update({
+                    'loss/step': step_loss,
+                    'loss_avr/step': avr_loss,
+                    'loss_ema/step': ema_loss,
+                    'lr/step': lr,
+                })
                 self.accelerator.log(self.accelerator_logs, step=self.train_state.global_step)
                 if self.use_wandb:
                     self.wandb_run.log(self.accelerator_logs, step=self.train_state.global_step)
                 self.pbar_logs.update({
-                    'lr': self.lr_scheduler.get_last_lr()[0],
+                    'lr': lr,
                     'epoch': self.train_state.epoch,
                     'global_step': self.train_state.global_step,
                     'next': len(self.train_dataloader) - step - 1,

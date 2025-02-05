@@ -1,12 +1,54 @@
 from typing import Union
 
 import torch
+import einops
 from torch import nn
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.resnet import Downsample2D, ResnetBlock2D
+
+
+class CrossAttention(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.to_q = nn.Conv2d(dim, dim, 1)
+        self.to_k = nn.Conv2d(dim, dim, 1)
+        self.to_v = nn.Conv2d(dim, dim, 1)
+        self.to_out = nn.Conv2d(dim, dim, 1)
+
+    def forward(self, x, context):
+        q = self.to_q(x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+
+        q = q.flatten(2).transpose(1, 2)
+        k = k.flatten(2).transpose(1, 2)
+        v = v.flatten(2).transpose(1, 2)
+
+        attn = (q @ k.transpose(-2, -1)) * (self.dim ** -0.5)
+        attn = attn.softmax(dim=-1)
+
+        out = attn @ v
+        out = out.transpose(1, 2).reshape_as(x)
+        out = self.to_out(out)
+
+        return out
+
+
+class ConcatLinear(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super().__init__()
+        self.linear = nn.Linear(dim_in, dim_out)
+
+    def forward(self, x, context):
+        concat = torch.cat((x, context), dim=1)
+        concat = concat.permute(0, 2, 3, 1)
+        concat = self.linear(concat)
+        concat = concat.permute(0, 3, 1, 2)
+        return concat
 
 
 class ControlNeXtModel(ModelMixin, ConfigMixin):
@@ -88,6 +130,9 @@ class ControlNeXtModel(ModelMixin, ConfigMixin):
             ))
 
         self.scale = controlnext_scale if not learnable_scale else nn.Parameter(torch.tensor(controlnext_scale))
+
+        self.cross_attn = CrossAttention(320)
+        self.concat_linear = ConcatLinear(640, 320)
 
     def forward(
         self,

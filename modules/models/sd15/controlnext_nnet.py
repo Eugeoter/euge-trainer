@@ -14,6 +14,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import math
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
@@ -1052,6 +1053,8 @@ class ControlNeXtUNet2DConditionModel(
         down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         mid_block_additional_residual: Optional[torch.Tensor] = None,
         controls: Optional[torch.Tensor] = None,
+        controls_2: Optional[torch.Tensor] = None,
+        controlnet=None,
         down_intrablock_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True,
@@ -1210,16 +1213,50 @@ class ControlNeXtUNet2DConditionModel(
             down_intrablock_additional_residuals = down_block_additional_residuals
             is_adapter = True
 
+        # Cross Normalization version
         if is_controlnext:
             scale = controls['scale']
             signal = controls['out']
+            if controls_2 is not None:
+                scale_2 = controls_2['scale']
+                signal_2 = controls_2['out']
+                signal_2 = signal_2.to(sample)
             # print(f"signal.shape: {signal.shape}, sample.shape: {sample.shape}")
             signal = signal.to(sample)
+
             mean_latents, std_latents = torch.mean(sample, dim=(1, 2, 3), keepdim=True), torch.std(sample, dim=(1, 2, 3), keepdim=True)
             mean_control, std_control = torch.mean(signal, dim=(1, 2, 3), keepdim=True), torch.std(signal, dim=(1, 2, 3), keepdim=True)
             signal = (signal - mean_control) * (std_latents / (std_control + 1e-12)) + mean_latents
             # print(f"scale: {scale}, signal: {signal.shape}, sample: {sample.shape}")
             sample = sample + signal * scale
+
+            if controls_2 is not None:
+                scale_2 = controls_2['scale']
+                signal_2 = controls_2['out']
+                signal_2 = signal_2.to(sample)
+                mean_latents, std_latents = torch.mean(sample, dim=(1, 2, 3), keepdim=True), torch.std(sample, dim=(1, 2, 3), keepdim=True)
+                mean_control, std_control = torch.mean(signal_2, dim=(1, 2, 3), keepdim=True), torch.std(signal_2, dim=(1, 2, 3), keepdim=True)
+                signal_2 = (signal_2 - mean_control) * (std_latents / (std_control + 1e-12)) + mean_latents
+                sample = sample + signal_2 * scale_2
+
+        # Cross Attention version
+        # if is_controlnext:
+        #     assert controlnet is not None, "ControlNet is required for cross-attention"
+        #     scale = controls['scale']
+        #     signal = controls['out']
+        #     signal = signal.to(sample)
+        #     with torch.autocast(device_type=sample.device.type):
+        #         sample = controlnet.cross_attn(sample, signal) * scale
+
+        # Concatenation version
+        # if is_controlnext:
+        #     assert controlnet is not None, "ControlNet is required for concatenation"
+        #     scale = controls['scale']
+        #     signal = controls['out']
+        #     signal = signal.to(sample)
+        #     with torch.autocast(device_type=sample.device.type):
+        #         # print(f"sample.dtype: {sample.dtype}, signal.dtype: {signal.dtype}, controlnet.dtype: {controlnet.dtype}")
+        #         sample = controlnet.concat_linear(sample, signal) * scale
 
         down_block_res_samples = (sample,)
         for i, downsample_block in enumerate(self.down_blocks):

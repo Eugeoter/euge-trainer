@@ -20,6 +20,9 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
     caption_getter: Callable[[dict], str] = lambda self, img_md, *args, **kwargs: img_md.get('caption') or ''
     negative_caption_getter: Callable[[dict], str] = lambda self, img_md, *args, **kwargs: img_md.get('negative_caption') or ''
 
+    caption_dropout_prob: float = 0.0
+    negative_caption_dropout_prob: float = 0.0
+
     image_resampling: str = 'lanczos'
     allow_crop: bool = True
     random_crop: bool = False
@@ -280,7 +283,11 @@ class T2IDataset(BaseDataset, AspectRatioBucketMixin, CacheLatentsMixin):
         return dataset_utils.get_input_ids(caption, tokenizer, max_token_length=self.max_token_length)
 
     def get_caption(self, img_md, is_flipped=False):
+        if self.caption_dropout_prob > 0 and random.random() < self.caption_dropout_prob:
+            return ''
         return self.caption_getter(img_md, dataset_hook=self.dataset_hook, is_flipped=is_flipped)
 
     def get_negative_caption(self, img_md, is_flipped=False):
+        if self.negative_caption_dropout_prob > 0 and random.random() < self.negative_caption_dropout_prob:
+            return ''
         return self.negative_caption_getter(img_md, dataset_hook=self.dataset_hook, is_flipped=is_flipped)
