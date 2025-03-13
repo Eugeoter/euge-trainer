@@ -415,7 +415,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
             **self.lr_scheduler_kwargs
         )
 
-        self.logger.info(f"Optimizer number of parameters: {logging.yellow(sum(p.numel() for p in optimizer.param_groups[0]['params']))}")
+        self.logger.info(f"Optimizer number of parameters: {logging.yellow(sum(sum(p['params'].numel() for p in pg['params']) for pg in optimizer.param_groups))}")
 
         if self.use_deepspeed:
             from ..utils import deepspeed_utils
@@ -876,6 +876,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
             for m in self.training_models:
                 m.train()
             for step, batch in enumerate(self.train_dataloader):
+                tic = time.time()
                 with self.accelerator.accumulate(*self.training_models) if not self.use_deepspeed else contextlib.nullcontext():
                     loss = self.train_step(batch)
                     # if self.loss_weight_getter is not None:
@@ -930,8 +931,11 @@ class BaseTrainer(class_utils.FromConfigMixin):
                     'ema_loss': ema_loss,
                 })
                 self.pbar.set_postfix(self.pbar_logs)
-                if self.gc_every_n_steps and self.train_state.global_step % self.gc_every_n_steps == 0:
+
+                if self.train_state.global_step > 0 and self.gc_every_n_steps and self.train_state.global_step % self.gc_every_n_steps == 0:
                     gc.collect()
+                toc = time.time()
+                self.logger.debug(f"step {self.train_state.global_step}: {toc - tic:.3f}s")
 
             # end of epoch
             self.accelerator_logs.update({"loss/epoch": self.loss_recorder.moving_average(window=self.num_steps_per_epoch)})
@@ -942,7 +946,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
             self.train_state.save(on_epoch_end=True)
             self.train_state.eval(on_epoch_end=True)
             self.train_state.trigger_events()
-            if self.gc_every_n_epochs and self.train_state.epoch % self.gc_every_n_epochs == 0:
+            if self.train_state.epoch > 0 and self.gc_every_n_epochs and self.train_state.epoch % self.gc_every_n_epochs == 0:
                 gc.collect()
             if self.train_state.global_step >= self.num_train_steps:
                 break

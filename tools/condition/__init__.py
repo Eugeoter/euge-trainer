@@ -267,7 +267,7 @@ def get_random_blur_condition(image: Union[Dict[str, Any], Image.Image], radius=
     return np.array(blur_condition)
 
 
-def get_random_inpaint_mask_condition(
+def get_random_inpainting_mask_condition(
     image: Union[Dict[str, Any], Image.Image],
     box_proba=1/2,
     bbox_min_size=30,

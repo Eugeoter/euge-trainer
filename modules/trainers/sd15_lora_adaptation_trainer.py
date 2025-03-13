@@ -1,4 +1,5 @@
 import torch
+import time
 from einops import rearrange
 from torch.nn import functional as F
 from torch import nn
