@@ -415,7 +415,7 @@ class BaseTrainer(class_utils.FromConfigMixin):
             **self.lr_scheduler_kwargs
         )
 
-        self.logger.info(f"Optimizer number of parameters: {logging.yellow(sum(sum(p['params'].numel() for p in pg['params']) for pg in optimizer.param_groups))}")
+        # self.logger.info(f"Optimizer number of parameters: {logging.yellow(sum(sum(p['params'].numel() for p in pg['params']) for pg in optimizer.param_groups))}")
 
         if self.use_deepspeed:
             from ..utils import deepspeed_utils

@@ -55,13 +55,13 @@ def get_config():
     config.save_train_state = False
     config.save_every_n_epochs = 0
     config.save_every_n_steps = 0
-    config.save_at_first = False
+    config.save_on_train_start = False
     config.save_on_train_end = False
     config.save_on_keyboard_interrupt = False
     config.save_on_exception = False
     config.save_max_n_models = 1
 
-    config.eval_at_first = True
+    config.eval_on_train_start = True
     config.eval_every_n_steps = 1000
     config.eval_every_n_epochs = 1
 
