@@ -10,6 +10,7 @@ def get_config():
 
     # Main parameters
     config.pretrained_model_name_or_path = '/path/to/model.safetensors'
+    # config.controlnet_model_name_or_path = '/path/to/controlnet.safetensors'
     config.output_dir = 'projects/sdxl_controlnet/my_controlnet'
     config.vae_model_name_or_path = None
     config.hf_cache_dir = None
@@ -36,6 +37,9 @@ def get_config():
     #     include_hand=True,
     #     include_face=True,
     # )
+
+    config.condition_dropout_prob = 0.0
+    config.caption_dropout_prob = 0.5
 
     config.resolution = 1024
     config.allow_crop = False
@@ -85,11 +89,11 @@ def get_config():
         gamma=0.9,
         stride=1000,
     )
-    config.save_precision = 'fp16'
+    config.save_precision = 'float'
     config.save_model = True
     config.save_train_state = True
     config.save_every_n_epochs = 0
-    config.save_every_n_steps = 1000
+    config.save_every_n_steps = 500
     config.save_on_train_start = False
     config.save_on_train_end = True
     config.save_on_keyboard_interrupt = False
@@ -120,32 +124,32 @@ def get_config():
     )
 
     # Training Parameters
-    config.num_train_epochs = 100
+    config.num_train_epochs = 10
     config.batch_size = 1
     config.learning_rate = 1e-5
     config.train_nnet = False
     config.learning_rate_nnet = 1e-5
     config.train_controlnet = True
-    config.learning_rate_controlnet = 1e-5
-    config.lr_scheduler = 'constant_with_warmup'
+    config.learning_rate_controlnet = 5e-5
+    config.lr_scheduler = 'cosine_with_restarts'
     config.lr_warmup_steps = 100
     config.lr_scheduler_power = 1.0
     config.lr_scheduler_num_cycles = 1
     config.lr_scheduler_kwargs = cfg()
     config.mixed_precision = 'fp16'
     config.full_bf16 = False
-    config.full_fp16 = True
+    config.full_fp16 = False
     config.train_text_encoder = False
     config.learning_rate_te = 5e-6
     config.gradient_checkpointing = True
-    config.gradient_accumulation_steps = 16
-    config.optimizer_type = 'AdaFactor'
+    config.gradient_accumulation_steps = 32
+    config.optimizer_type = 'AdamW'
     config.optimizer_kwargs = cfg(
-        relative_step=False,
-        scale_parameter=False,
-        warmup_init=False,
-        # weight_decay=0.03,
-        # betas=(0.9, 0.9),
+        # relative_step=False,
+        # scale_parameter=False,
+        # warmup_init=False,
+        weight_decay=0.01,
+        betas=(0.9, 0.99),
         # amsgrad=False
     )
     config.cpu = False

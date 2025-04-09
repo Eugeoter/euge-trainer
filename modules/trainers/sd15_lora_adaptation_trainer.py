@@ -8,13 +8,13 @@ from typing import Dict, List, Union, Literal
 from safetensors.torch import load_file
 from waifuset import logging
 from .sd15_trainer import SD15Trainer
-from ..utils import lora_utils, sd15_train_utils, vae_train_utils, train_utils
+from ..utils import lora_utils, sd15_train_utils, vae_train_utils, train_utils, loss_utils
 from ..models.sd15 import lora_adapter
 from ..train_state.sd15_lora_adaptation_train_state import SD15LoRAAdaptationTrainState
 
 
 class SD15LoRAAdaptationTrainer(SD15Trainer):
-    backbone_type: str = 'sd15'
+    backbone: str = 'sd15'
 
     # (i) path to a single lora model, (ii) list of paths to multiple lora models, or (iii) dictionary mapping model path to lora trigger word
     pretrained_lora_model_name_or_path: Union[str, Dict[str, str], List[str], List[Dict[str, str]]] = None
@@ -44,21 +44,34 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
 
     lambda_lpips: float = 0
 
-    use_gan: bool = False
-    use_lecam: bool = False
-    gan_disc_type: str = "bce"
+    use_gan_loss: bool = False
+    use_lpips_loss: bool = False
+    use_mse_loss: bool = True
+    use_ms_loss: bool = False
+    use_freq_loss: bool = False
+    use_cov_loss: bool = False
+    use_kld_loss: bool = False
+
+    lambda_ms: float = 5e2
+    lambda_freq: float = 0.2
+    lambda_cov: float = 10
+    # use_lecam: bool = False
+    # gan_disc_type: str = "bce"
+    lambda_mse: float = 1.0
     lambda_gan: float = 0.01
     lambda_kld: float = 1.0
     kld_patch_size: int = 4
-    lecam_loss_weight = 0.1
-    lecam_anchor_real_logits = 0.0
-    lecam_anchor_fake_logits = 0.0
-    lecam_beta = 0.9
+
+    # lecam_loss_weight = 0.1
+    # lecam_anchor_real_logits = 0.0
+    # lecam_anchor_fake_logits = 0.0
+    # lecam_beta = 0.9
+
     lr_discriminator: float = 1e-3
     disc_optimizer_type: str = "AdamW"
     disc_optimizer_kwargs: Dict[str, Union[str, float]] = {}
     disc_lr_scheduler_type: str = "constant_with_warmup"
-    disc_lr_warmup_steps: int = 0
+    disc_lr_warmup_steps: int = 50
     disc_lr_scheduler_num_cycles: int = 1
     disc_lr_scheduler_power: float = 1.0
     disc_lr_scheduler_kwargs: Dict[str, Union[str, float]] = {}
@@ -105,7 +118,7 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
             taus_phi.append(tau_phi)
             taus_psi.append(tau_psi)
 
-        self.lora_name_to_weight_shape = lora_utils.make_lora_name_to_weight_shape_map(loras, model_type=self.backbone_type)
+        self.lora_name_to_weight_shape = lora_utils.make_lora_name_to_weight_shape_map(loras, backbone=self.backbone)
         self.taus_phi = taus_phi
         self.taus_psi = taus_psi
 
@@ -155,7 +168,7 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
             },
             lora_state_dicts=self.loras,
             lora_strength=self.lora_strength,
-            model_type=self.backbone_type,
+            model_type=self.backbone,
             merge_device=self.device,
             merge_dtype=self.weight_dtype,
             # name_to_module=self.lora_name_to_module,
@@ -174,6 +187,7 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         if not hasattr(self, 'text_encoder'):
             raise ValueError("text_encoder is not loaded yet, please load text_encoder first.")
 
+        self.logger.info(f"Use {logging.yellow(self.lora_adapter_type)} LoRA adapter")
         if self.lora_adapter_type == 'layerwise':
             self.lora_adapter_class = lora_adapter.LayerWiseMultiLoRAAdapter
         elif self.lora_adapter_type == 'elementwise':
@@ -181,8 +195,8 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         else:
             raise ValueError(f"Invalid lora_adapter_type: {self.lora_adapter_type}, expected 'layerwise' or 'elementwise'")
 
-        self.lora_name_to_orig_module = lora_utils.make_lora_name_to_module_map([self.nnet, self.text_encoder], model_type=self.backbone_type, debug_te=False)
-        self.lora_name_to_orig_module_name = lora_utils.make_lora_name_to_module_name_map([self.nnet, self.text_encoder], model_type=self.backbone_type)
+        self.lora_name_to_orig_module = lora_utils.make_lora_name_to_module_map([self.nnet, self.text_encoder], backbone=self.backbone, debug_te=False)
+        self.lora_name_to_orig_module_name = lora_utils.make_lora_name_to_module_name_map([self.nnet, self.text_encoder], model_type=self.backbone)
 
         if self.init_w0 is None:
             self.init_w0 = 1.0
@@ -208,7 +222,7 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
             init_w0=self.init_w0,
             init_w1=self.init_w1,
             lora_state_dicts=self.loras,
-            model_type=self.backbone_type,
+            model_type=self.backbone,
             lora_name_to_module=self.lora_name_to_orig_module,
             lora_name_to_module_name=self.lora_name_to_orig_module_name,
             lora_wrapper_class=self.lora_adapter_class,
@@ -217,11 +231,11 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         )
 
         # cache maps
-        self.lora_name_to_module = lora_utils.make_lora_name_to_lora_wrapper_map(wrapper_models.values(), model_type=self.backbone_type, debug_te=False)
+        self.lora_name_to_module = lora_utils.make_lora_name_to_lora_wrapper_map(wrapper_models.values(), model_type=self.backbone, debug_te=False)
         # self.logger.debug(f"lora_name_to_module: {json.dumps({k: v.__class__.__name__ for k, v in self.lora_name_to_module.items()}, indent=2)}")
         # for module in wrapper_models.values():
         #     self.logger.debug(module)
-        self.lora_name_to_module_name = lora_utils.make_lora_name_to_module_name_map(wrapper_models.values(), model_type=self.backbone_type)
+        self.lora_name_to_module_name = lora_utils.make_lora_name_to_module_name_map(wrapper_models.values(), model_type=self.backbone)
         self.models_psi = {model_name + '_psi': model for model_name, model in wrapper_models.items()}
 
         # for lora_sd in self.loras:
@@ -236,10 +250,19 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         discriminator.apply(gan.weights_init)
         return {'discriminator': discriminator}
 
+    def _setup_loss_functions(self):
+        super()._setup_loss_functions()
+
+        if self.use_ms_loss:
+            self.ms_loss = loss_utils.MultiScaleLoss(scales=[1.0, 0.5, 0.25], projection_dim=64).to(self.device)
+
+        if self.use_freq_loss:
+            self.freq_loss = loss_utils.FrequencyLoss(high_freq_weight=3.0).to(self.device)
+
     def _setup_optims(self):
         super()._setup_optims()
 
-        if self.use_gan:
+        if self.use_gan_loss:
             self.disc_optimizer = train_utils.get_optimizer(
                 optimizer_type=self.disc_optimizer_type,
                 trainable_params=self.discriminator.parameters(),
@@ -357,10 +380,10 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         return encoder_hidden_states
 
     def is_disc_step(self):
-        return self.use_gan and self.train_state.global_step % 2 == 0
+        return self.use_gan_loss and self.train_state.global_step % 2 == 0
 
     def is_gen_step(self):
-        return self.use_gan and self.train_state.global_step % 2 == 1
+        return self.use_gan_loss and self.train_state.global_step % 2 == 1
 
     def patch_nce(self, p_psi, p_theta, p_psi_tau, p_phi, patch_num=4):
         # 这里是随机选取patch_num个patch，计算patch之间的相似度
@@ -439,6 +462,24 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
 
         return loss
 
+    def covariance_loss(self, pred, target):
+        B, C, H, W = pred.shape
+
+        def compute_cov(x):
+            x_flat = x.reshape(B, C, -1).permute(1, 0, 2)  # [C, B, H*W]
+            mean = x_flat.mean(dim=-1, keepdim=True)
+            x_centered = x_flat - mean
+            cov = torch.bmm(x_centered, x_centered.transpose(1, 2)) / (H * W - 1)
+            return cov
+
+        pred_cov = compute_cov(pred)
+        target_cov = compute_cov(target.detach())
+
+        reg = 1e-3 * torch.eye(C, device=pred.device).unsqueeze(0)
+        loss = F.mse_loss(pred_cov + reg, target_cov + reg)
+
+        return loss
+
     def kl_divergence(self, reconstructed_tensor, groundtruth_tensor, path_size=8, overlap=True, weight=1000):
         B, C, H, W = reconstructed_tensor.shape
     #   print(f'H: {H}, W: {W}')
@@ -499,9 +540,13 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         model_pred = model_pred.to(dtype=torch.float32)
         target = target.to(dtype=torch.float32)
         if self.is_disc_step():
-            logits_real = self.discriminator(target.detach().to(dtype=torch.float32))
-            logits_fake = self.discriminator(model_pred.detach().to(dtype=torch.float32))
-            d_loss = vae_train_utils.hinge_d_loss(logits_real, logits_fake) * self.lambda_gan
+            try:
+                logits_real = self.discriminator(target.detach().to(dtype=torch.float32))
+                logits_fake = self.discriminator(model_pred.detach().to(dtype=torch.float32))
+                d_loss = vae_train_utils.hinge_d_loss(logits_real, logits_fake) * self.lambda_gan
+            except Exception as e:
+                self.logger.error(f"Error in calculating discriminator loss: {e}. Model pred shape: {model_pred.shape}, target shape: {target.shape}")
+                d_loss = torch.tensor(0.0, device=self.device, dtype=self.weight_dtype)
             loss = d_loss
 
             # self.logger.debug(f"Discriminator loss: {d_loss.item()}")
@@ -511,9 +556,24 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
 
         else:
             loss = 0
-            mse_loss = super().get_loss(model_pred, target, timesteps, batch)
-            loss += mse_loss
-            if self.lambda_lpips:
+
+            if self.use_mse_loss:
+                mse_loss = super().get_loss(model_pred, target, timesteps, batch) * self.lambda_mse
+                loss += mse_loss
+
+            if self.use_ms_loss:
+                ms_loss = self.ms_loss(model_pred, target) * self.lambda_ms
+                loss += ms_loss
+
+            if self.use_freq_loss:
+                freq_loss = self.freq_loss(model_pred, target) * self.lambda_freq
+                loss += freq_loss
+
+            if self.use_cov_loss:
+                cov_loss = self.covariance_loss(model_pred, target) * self.lambda_cov
+                loss += cov_loss
+
+            if self.use_lpips_loss:
                 try:
                     if target.shape[1] < 3:
                         # We'll put zeros in the third channel...
@@ -531,21 +591,26 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
                 loss += self.lambda_lpips * lpips_loss_batch
 
             if self.is_gen_step():
-                kld_loss = self.kl_divergence(model_pred, target, path_size=self.kld_patch_size, overlap=True, weight=10) * self.lambda_kld
+                if self.use_kld_loss:
+                    kld_loss = self.kl_divergence(model_pred, target, path_size=self.kld_patch_size, overlap=True, weight=10) * self.lambda_kld
+                    loss += kld_loss
                 logits_real = self.discriminator(target)
                 logits_fake = self.discriminator(model_pred.to(dtype=torch.float32))
                 g_loss = vae_train_utils.hinge_d_loss(logits_real, logits_fake) * self.lambda_gan
-                loss += kld_loss + g_loss
+                loss += g_loss
 
                 # self.logger.debug(f"MSE loss: {mse_loss.item()}")
                 # self.logger.debug(f"Generator loss: {g_loss.item()}")
                 # self.logger.debug(f"KL divergence loss: {kld_loss.item()}")
 
             self.accelerator_logs.update({
-                f"mse_loss/step": mse_loss.item(),
-                f"kld_loss/step": kld_loss.item() if self.is_gen_step() else None,
+                f"mse_loss/step": mse_loss.item() if self.use_mse_loss else None,
                 f"g_loss/step": g_loss.item() if self.is_gen_step() else None,
-                f"lpips_loss/step": lpips_loss_batch.item() if self.lambda_lpips else None,
+                f"ms_loss/step": ms_loss.item() if self.use_ms_loss else None,
+                f"freq_loss/step": freq_loss.item() if self.use_freq_loss else None,
+                f"cov_loss/step": cov_loss.item() if self.use_cov_loss else None,
+                f"kld_loss/step": kld_loss.item() if self.is_gen_step() else None,
+                f"lpips_loss/step": lpips_loss_batch.item() if self.use_lpips_loss else None,
             })
 
         return loss
@@ -683,7 +748,11 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
         texts_phi = [', '.join(self.taus_phi) + ', ' + txt for txt in texts]
         texts_tau = [', '.join(self.taus_psi) + ', ' + txt for txt in texts]
         with self.accelerator.autocast():
-            y_theta = self.encode_caption_kohya(texts, self.text_encoder)  # theta
+            try:
+                y_theta = self.encode_caption_kohya(texts, self.text_encoder)  # theta
+            except:
+                self.logger.debug(f"text_encoders.device: {self.text_encoder.device}, nnet.device: {self.nnet.device}")
+                raise
             y_psi = self.encode_caption_kohya(texts, self.text_encoder_psi)  # psi without tau
 
             y_phi = self.encode_caption_kohya(texts_phi, self.text_encoder_phi)  # phi
@@ -700,14 +769,15 @@ class SD15LoRAAdaptationTrainer(SD15Trainer):
             p_phi = self.nnet_phi(z_t, t, y_phi).sample  # phi
             p_psi_tau = self.nnet_psi(z_t, t, y_psi_tau).sample  # psi with tau
 
-        loss_off = self.get_loss(p_theta, p_psi, timesteps=t, batch=batch, is_on=False)
-        loss_on = self.get_loss(p_phi, p_psi_tau, timesteps=t, batch=batch, is_on=True)
+        loss_off = self.get_loss(p_psi, p_theta, timesteps=t, batch=batch, is_on=False)
+        loss_on = self.get_loss(p_psi_tau, p_phi, timesteps=t, batch=batch, is_on=True)
         loss = self.loss_beta_1 * loss_on + self.loss_beta_2 * loss_off
 
         # Debug merge weights W
-        W = [module.w1[0] for module in self.lora_name_to_module.values()]
-        W = W[0].float().detach().cpu().numpy()
-        self.logger.debug(f"step={self.train_state.global_step:5d} | ratios={logging.blue(W)}", write=True)
+        if self.accelerator.is_local_main_process:
+            W = [module.w1[0] for module in self.lora_name_to_module.values()]
+            W = W[0].float().detach().cpu().numpy()
+            self.logger.debug(f"step={self.train_state.global_step:5d} | ratios={logging.blue(W)}", write=True)
 
         self.accelerator_logs.update({
             "loss_on/step":  loss_on.item(),

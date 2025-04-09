@@ -134,6 +134,7 @@ class SD15Trainer(BaseTrainer):
                 self._setup_dataset,
                 self._setup_training,
                 self._setup_params,
+                self._setup_loss_functions,
                 self._setup_optims,
                 self._setup_loss_recorder,
                 self._setup_train_state,
@@ -475,6 +476,9 @@ class SD15Trainer(BaseTrainer):
 
         if self.use_edm2:
             self.edm2_mlp = self.get_edm2_mlp()
+
+    def _setup_loss_functions(self):
+        pass
 
     def get_noise_scheduler(self):
         noise_scheduler = DDPMScheduler(

@@ -90,11 +90,11 @@ TEXT_ENCODER = r"text_model\."
 #                         child_module.set_ratio(ratios[ratio_index])
 
 
-def make_lora_name_to_module_map(modules, model_type: Literal['sdxl', 'sd15'] = 'sd15', debug_te=False):
+def make_lora_name_to_module_map(modules, backbone: Literal['sdxl', 'sd15'] = 'sd15', debug_te=False):
     name_to_module = {}
     for i, root_module in enumerate(modules):
         if i >= 1:  # te
-            if model_type == 'sdxl':  # sdxl
+            if backbone == 'sdxl':  # sdxl
                 if i == 1:
                     prefix = LORA_PREFIX_TEXT_ENCODER1
                 else:
@@ -197,7 +197,7 @@ def make_lora_name_to_module_name_map(modules, model_type: Literal['sdxl', 'sd15
 
 def make_lora_name_to_weight_shape_map(
     lora_state_dicts: List[Dict[str, torch.Tensor]],
-    model_type: Literal['sdxl', 'sd15'] = 'sd15',
+    backbone: Literal['sdxl', 'sd15'] = 'sd15',
 ) -> Dict[str, Tuple[int, int]]:
     lora_name_to_weight_shape = {}
     for lora_state_dict in lora_state_dicts:

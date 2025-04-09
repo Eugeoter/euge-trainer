@@ -10,10 +10,12 @@ class SD15LoRAAdaptationTrainState(SD15TrainState):
     def save_diffusion_model(self) -> str:
         save_path = os.path.join(self.output_model_dir, f"{self.output_name['models']}_ep{self.epoch}_step{self.global_step}.safetensors")
 
-        nnet_psi = copy.deepcopy(self.nnet.to('cpu'))
-        text_encoder_psi = copy.deepcopy(self.text_encoder.to('cpu'))
+        self.nnet.to('cpu')
+        self.text_encoder.to('cpu')
+        nnet_psi = copy.deepcopy(self.nnet)
+        text_encoder_psi = copy.deepcopy(self.text_encoder)
 
-        lora_name_to_save_module = lora_utils.make_lora_name_to_module_map([nnet_psi, text_encoder_psi], model_type=self.model_type)
+        lora_name_to_save_module = lora_utils.make_lora_name_to_module_map([nnet_psi, text_encoder_psi], backbone=self.backbone)
         for lora_name in self.lora_name_to_module.keys():
             save_module = lora_name_to_save_module[lora_name]
             wrapper = self.lora_name_to_module[lora_name]
@@ -24,7 +26,7 @@ class SD15LoRAAdaptationTrainState(SD15TrainState):
             assert wrapper.module.weight.data.shape == save_module.weight.data.shape, f"{wrapper.module.weight.data.shape} != {save_module.weight.data.shape}"
             assert merged_weight.shape == save_module.weight.data.shape, f"{merged_weight.shape} != {save_module.weight.data.shape}"
             save_module.weight.data = merged_weight
-            wrapper = wrapper.to(self.device)
+            wrapper = wrapper.to(self.device)  # to original device
 
         sd15_model_utils.save_stable_diffusion_checkpoint(
             output_file=save_path,
