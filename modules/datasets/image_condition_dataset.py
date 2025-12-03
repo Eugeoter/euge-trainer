@@ -40,18 +40,6 @@ class ImageConditionDataset(T2IDataset):
     random_condition_image_types: List[str] = ['canny', 'depth_midas', 'lineart_anime', 'mlsd', 'normal_midas', 'scribble_hed', 'softedge_hed']
 
     def check_config(self):
-        if self.use_random_condition_image_type:
-            if not self.random_condition_image_types or len(self.random_condition_image_types) == 0:
-                raise ValueError("Random condition image types list is empty")
-            if self.condition_image_getter is not None:
-                self.logger.warning("Both random condition image type and condition image getter are set, random condition image type will be used")
-            if self.cache_condition_image:
-                self.logger.warning("Cache condition image is enabled, but random condition image type is used, caching will be disabled")
-                self.cache_condition_image = False
-            if self.keep_condition_image_in_memory:
-                self.logger.warning("Keep condition image in memory is enabled, but random condition image type is used, keeping in memory will be disabled")
-                self.keep_condition_image_in_memory = False
-
         if not self.condition_image_getter_kwargs:
             self.condition_image_getter_kwargs = {}
 
