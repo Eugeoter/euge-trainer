@@ -35,15 +35,31 @@ class ImageConditionDataset(T2IDataset):
     condition_image_cache_dir: str = None
     keep_condition_image_in_memory: bool = False
 
+    # ControlNet++ specific
+    use_random_condition_image_type: bool = False
+    random_condition_image_types: List[str] = ['canny', 'depth_midas', 'lineart_anime', 'mlsd', 'normal_midas', 'scribble_hed', 'softedge_hed']
+
     def check_config(self):
+        if self.use_random_condition_image_type:
+            if not self.random_condition_image_types or len(self.random_condition_image_types) == 0:
+                raise ValueError("Random condition image types list is empty")
+            if self.condition_image_getter is not None:
+                self.logger.warning("Both random condition image type and condition image getter are set, random condition image type will be used")
+            if self.cache_condition_image:
+                self.logger.warning("Cache condition image is enabled, but random condition image type is used, caching will be disabled")
+                self.cache_condition_image = False
+            if self.keep_condition_image_in_memory:
+                self.logger.warning("Keep condition image in memory is enabled, but random condition image type is used, keeping in memory will be disabled")
+                self.keep_condition_image_in_memory = False
+
         if not self.condition_image_getter_kwargs:
             self.condition_image_getter_kwargs = {}
 
         if self.condition_image_type is not None:
             if self.condition_image_getter is not None:
-                self.logger.info(f"Overwrite condition image getter with condition image type: {logging.yellow(self.condition_image_type)}")
+                self.logger.info(f"Overwrite default condition image getter with condition image type: {logging.yellow(self.condition_image_type)}")
             else:
-                self.logger.info(f"Using condition image type: {logging.yellow(self.condition_image_type)}")
+                self.logger.info(f"Using default condition image type: {logging.yellow(self.condition_image_type)}")
 
             if self.condition_image_getter_kwargs and 'condition_type' in self.condition_image_getter_kwargs:
                 self.logger.warning(f"Overwrite condition image getter kwargs condition_type with condition image type: {logging.yellow(self.condition_image_type)}")
@@ -68,9 +84,16 @@ class ImageConditionDataset(T2IDataset):
         return os.path.join(self.condition_image_cache_dir, f"{img_md['image_key']}.png")
 
     def open_condition_image(self, img_md) -> Image.Image:
-        if self.cache_condition_image and (condition_image_cache_path := self.get_condition_image_cache_path(img_md)) is not None and os.path.exists(condition_image_cache_path) and (condition_image := Image.open(condition_image_cache_path)) is not None and condition_image.verify():
+        if self.use_random_condition_image_type:
+            condition_image_type = random.choice(self.random_condition_image_types)
+            condition_image = get_controlnet_aux_condition(self.get_image(img_md), condition_type=condition_image_type)
+            img_md['condition_image_type'] = condition_image_type
+            if condition_image is None:
+                self.logger.warning(f"Failed to get condition image for random condition image type: {condition_image_type} for image {img_md.get('image_key')}")
+            return condition_image
+        elif self.cache_condition_image and (condition_image_cache_path := self.get_condition_image_cache_path(img_md)) is not None and os.path.exists(condition_image_cache_path) and (condition_image := Image.open(condition_image_cache_path)) is not None and condition_image.verify():
             pass
-        elif self.condition_image_type and (condition_image := get_controlnet_aux_condition(self.get_image(img_md), condition_type=self.condition_image_type)) is not None:
+        elif (condition_image_type := self.get_condition_image_type(img_md)) is not None and (condition_image := get_controlnet_aux_condition(self.get_image(img_md), condition_type=condition_image_type)) is not None:
             if self.cache_condition_image and self.condition_image_cache_dir:
                 if not os.path.exists(condition_image_cache_path):
                     condition_image.save(condition_image_cache_path)
@@ -124,9 +147,18 @@ class ImageConditionDataset(T2IDataset):
             raise ValueError(f"Invalid condition image type: {type}, must be 'pil', 'tensor' or 'numpy'")
         return condition_image
 
+    def get_condition_image_type(self, img_md) -> str:
+        if 'condition_image_type' in img_md:
+            return img_md['condition_image_type']
+        elif self.condition_image_type is not None:
+            return self.condition_image_type
+        else:
+            return None  # unknown
+
     def get_condition_image_sample(self, batch: List[str], samples: Dict[str, Any]) -> Dict[str, Any]:
         sample = dict(
             condition_images=[],
+            condition_image_types=[],
         )
         for i, img_key in enumerate(batch):
             img_md = self.dataset[img_key]
@@ -135,6 +167,9 @@ class ImageConditionDataset(T2IDataset):
             if is_flipped:
                 condition_image = torch.flip(condition_image, dims=[2])
             sample["condition_images"].append(condition_image)
+            condition_image_type = self.get_condition_image_type(img_md)
+            sample["condition_image_types"].append(condition_image_type)
+
         sample["condition_images"] = torch.stack(sample["condition_images"], dim=0).to(memory_format=torch.contiguous_format).float()
         return sample
 

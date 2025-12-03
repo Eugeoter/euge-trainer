@@ -2,7 +2,7 @@ import torch
 import random
 import numpy as np
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
-from diffusers.models.controlnet import ControlNetModel
+from diffusers.models.controlnets.controlnet import ControlNetModel
 from diffusers.pipelines.controlnet.pipeline_controlnet_sd_xl import StableDiffusionXLControlNetPipeline
 from .sd15_controlnet_trainer import SD15ControlNetTrainer
 from .sdxl_trainer import SDXLTrainer

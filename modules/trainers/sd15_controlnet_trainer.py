@@ -2,7 +2,7 @@ import torch
 import os
 from torch import nn
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
-from diffusers.models.controlnet import ControlNetModel
+from diffusers.models.controlnets.controlnet import ControlNetModel
 from .sd15_trainer import SD15Trainer
 from ..train_state.sd15_controlnet_train_state import SD15ControlNetTrainState
 from ..datasets.image_condition_dataset import ImageConditionDataset

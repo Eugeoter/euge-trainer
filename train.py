@@ -53,6 +53,9 @@ def main(argv):
     elif trainer == 'ws':
         from modules.trainers.ws_trainer import WaifuScorerTrainer
         trainer_class = WaifuScorerTrainer
+    elif trainer == 'sdxl_controlnet_plus':
+        from modules.trainers.sdxl_controlnet_plus_trainer import SDXLControlNeXtPlusTrainer
+        trainer_class = SDXLControlNeXtPlusTrainer
     else:
         raise ValueError(f"Invalid trainer: {trainer}")
 

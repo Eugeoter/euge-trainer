@@ -1,9 +1,9 @@
 import torch
 import os
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 from .sd15_trainer import SD15Trainer
 from ..datasets.sdxl_dataset import SDXLDataset
-from ..utils import train_utils, sdxl_model_utils, sdxl_train_utils, sd15_train_utils
+from ..utils import sdxl_model_utils, sdxl_train_utils, sd15_train_utils
 
 from ..models.sdxl.nnet import SDXLUNet2DConditionModel
 from ..pipelines.sdxl_lpw_pipeline import SDXLStableDiffusionLongPromptWeightingPipeline

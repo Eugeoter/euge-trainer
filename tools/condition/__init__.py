@@ -350,3 +350,37 @@ def get_random_inpainting_masked_image_condition(
     mask = Image.eval(mask, lambda a: 255 - a)
     masked_image = Image.composite(image, Image.new('RGB', image.size, (0, 0, 0)), mask)
     return np.array(masked_image)
+
+
+def get_random_outpainting_mask_condition(
+    image: Union[Dict[str, Any], Image.Image],
+    min_margin_ratio: float = 0.1,
+    max_margin_ratio: float = 0.4,
+) -> np.ndarray:
+    from .outpaint import get_random_outpainting_mask
+    if isinstance(image, dict):
+        img_path = image['image_path']
+        image = Image.open(img_path)
+    mask = get_random_outpainting_mask(image, min_margin_ratio, max_margin_ratio)
+    return np.array(mask)
+
+
+def get_random_outpainting_masked_image_condition(
+    image: Union[Dict[str, Any], Image.Image],
+    min_margin_ratio: float = 0.1,
+    max_margin_ratio: float = 0.4,
+) -> np.ndarray:
+    from .outpaint import get_random_outpainting_mask
+    if isinstance(image, dict):
+        img_path = image['image_path']
+        image = Image.open(img_path)
+    np_img = np.array(image)
+
+    mask = get_random_outpainting_mask(image, min_margin_ratio, max_margin_ratio)
+    mask = Image.fromarray(mask, mode='L').resize(image.size, Image.BILINEAR)
+    mask_np = np.array(mask)
+
+    masked_image = np_img.copy()
+    masked_image[mask_np == 0] = 0
+
+    return masked_image
