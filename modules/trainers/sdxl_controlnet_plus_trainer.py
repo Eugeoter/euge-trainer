@@ -30,8 +30,8 @@ class SDXLControlNeXtPlusTrainer(SDXLControlNetTrainer):
 
     def get_loss(self, model_pred, target, timesteps, batch) -> float:
         loss_train = super().get_loss(model_pred, target, timesteps, batch)
-        # loss_reward = self.get_reward_loss(model_pred, target, timesteps, batch)
-        loss_reward = 0.0
+        loss_reward = self.get_reward_loss(model_pred, target, timesteps, batch)
+        # loss_reward = 0.0
         return loss_train + loss_reward
 
     def get_reward_loss(self, model_pred, target, timesteps, batch) -> float:
